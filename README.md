@@ -314,13 +314,13 @@ failure — no console output, nothing — if skipped:
    kernel-image-size limit for a long time before the real cause was
    found — several rounds of shrinking the kernel "fixed" it only by
    accident, by changing unrelated build parameters alongside it.)
-2. **Package the patched Image raw, never gzip.** This loader's
-   built-in gzip decompression is unreliable above a few MB and fails
-   in different, non-obvious ways depending on size (`inflate()`
-   buffer errors, or silent hangs) — raw avoids the decompression step
-   in the loader entirely. `dd`-append 512 KB of zero padding after
-   the patched Image (`xbuild.sh` in the vendor tree does the same;
-   exact reason not confirmed, but required by their tooling).
+2. **Package the patched Image with gzip (`pigz -11`).** This was
+   avoided for a long time on the theory that the loader's built-in
+   gzip decompression was unreliable above a few MB (`inflate()`
+   buffer errors, or silent hangs) — but that theory has since been
+   confirmed wrong on real hardware at the sizes this port actually
+   produces, and this is now the standard packaging step (see
+   `tools/monarch/patch-header.py`'s docstring).
 
 The safe way to test any of this without touching the board's internal
 storage: this loader has a `boot_rescue_from_usb` path (triggered by
