@@ -73,7 +73,10 @@ struct rtd129x_scpu_freq {
 	u32 val;
 };
 
-/* Exact copy of the vendor's scpu_tbl[] (clk-rtd1295-cc.c). */
+/*
+ * Exact copy of the vendor's scpu_tbl[] (clk-rtd1295-cc.c), plus one
+ * locally-added entry (marked below) disambiguating a tie in it.
+ */
 static const struct rtd129x_scpu_freq rtd129x_scpu_freq_tbl[] = {
 	{ 1000000000, SCPU_FREQ_NF(34,   75) },
 	{ 1100000000, SCPU_FREQ_NF(37, 1517) },
@@ -86,6 +89,19 @@ static const struct rtd129x_scpu_freq rtd129x_scpu_freq_tbl[] = {
 	{ 1200000000, SCPU_FREQ_NF(41, 1024) },
 	{ 1300000000, SCPU_FREQ_NF(45, 1024) },
 	{ 1503000000, SCPU_FREQ_NF(48, 1744) },
+	/*
+	 * NF(41, 1024) above is the boot loader's own PLL setting, labeled
+	 * 1200000000 in the vendor table like its neighbor NF(41, 910), but
+	 * actually ~1201.5 MHz. find_freq()'s closest-below-with-ties-
+	 * broken-by-table-order search let that label collision silently
+	 * prefer NF(41, 910) whenever a caller asked for the boot value's
+	 * true rate (e.g. the 300.375/600.75 MHz OPPs, each needing exactly
+	 * 1201500000 one or two post-dividers up) -- reprogramming the PLL
+	 * away from the boot setting every time, off by ~1.5 MHz, instead of
+	 * leaving it alone. Giving the true rate its own exact entry here
+	 * makes find_freq() match it directly, before the tie ever matters.
+	 */
+	{ 1201500000, SCPU_FREQ_NF(41, 1024) },
 };
 
 struct rtd129x_scpu_clk {
