@@ -440,6 +440,26 @@ config REGULATOR_FAN53880
 	  (PMIC), it is controlled by I2C and provides one BUCK, one BOOST
 	  and four LDO outputs.
 
+config REGULATOR_G22XX_CORE
+	tristate
+	help
+	  Shared helper code for the GMT/Realtek G22xx-series PMIC
+	  voltage regulators. Selected automatically by the individual
+	  chip drivers (e.g. REGULATOR_G2227); no need to enable it
+	  directly.
+
+config REGULATOR_G2227
+	tristate "GMT/Realtek G2227 voltage regulators"
+	depends on MFD_G2227_I2C
+	select REGULATOR_G22XX_CORE
+	help
+	  Support for the DCDC/LDO voltage regulators on the
+	  GMT/Realtek G2227 PMIC (see MFD_G2227_I2C), as used on some
+	  Realtek RTD129x-based boards.
+
+	  This driver can also be built as a module. If so, the module
+	  will be called g2227-regulator.
+
 config REGULATOR_GPIO
 	tristate "GPIO regulator support"
 	depends on GPIOLIB || COMPILE_TEST

@@ -538,6 +538,19 @@ config MFD_EXYNOS_LPASS
 	  SoCs (e.g. Exynos5433).
 	  Choose Y here only if you build for such Samsung SoC.
 
+config MFD_G2227_I2C
+	tristate "GMT/Realtek G2227 PMIC"
+	depends on I2C
+	select MFD_CORE
+	select REGMAP_I2C
+	help
+	  Support for the GMT/Realtek G2227 PMIC, as used on some
+	  Realtek RTD129x-based boards (I2C core plus the DCDC/LDO
+	  voltage regulators -- see REGULATOR_G2227).
+
+	  This driver can also be built as a module. If so, the module
+	  will be called g2227-i2c.
+
 config MFD_GATEWORKS_GSC
 	tristate "Gateworks System Controller"
 	depends on I2C && OF
