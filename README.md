@@ -301,6 +301,13 @@ only.
 
 ## Building and booting
 
+For a full step-by-step walkthrough — toolchain setup on a clean Debian 13
+machine, cloning, `.config`, the build itself, packaging for USB rescue-boot
+testing, and flashing a build for a normal (non-rescue) boot via the firmware
+checksum table — see [`BUILDING.md`](BUILDING.md). The notes below cover the
+two easy-to-miss hardware requirements behind that walkthrough's packaging
+steps.
+
 This board's U-Boot (`2015.07`, `Realtek QA Board`, 2016 build) has two
 requirements that are very easy to miss and produce total, silent boot
 failure — no console output, nothing — if skipped:
