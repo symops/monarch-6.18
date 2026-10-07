@@ -1,6 +1,6 @@
 # Linux 6.18 for WD My Cloud Home (Realtek RTD1295 "Monarch")
 
-This tree is vanilla `v6.18.51` (rebased from the initial `v6.18` this port
+This tree is vanilla `v6.18.55` (rebased from the initial `v6.18` this port
 started on via a 3-way merge, `v6.18` as merge base — see "Updating the base
 version" below) plus a board port for the WD My Cloud Home
 (single-bay), a NAS built around Realtek's RTD1295 SoC. It replaces the
@@ -299,6 +299,19 @@ directly, **this time confirmed working on real Monarch hardware**
 Negligible cost: ~100 cycles once per `do_idle()` entry, idle path
 only.
 
+### Base version bump: v6.18.52 → v6.18.54
+
+Rebased onto v6.18.54 the same way — clean merge, no conflicts.
+Rebuilt `Image`/`dtbs`/`modules` with `LOCALVERSION=` and repackaged;
+KSMBD (`CONFIG_SMB_SERVER`) also enabled in `.config` around this point
+(module, with `SMB_SERVER_KERBEROS5`) — `.config` isn't tracked in git,
+so that change lives only in built artifacts, not in this history.
+
+### Base version bump: v6.18.54 → v6.18.55
+
+Rebased onto v6.18.55 the same way — clean merge, no conflicts.
+Rebuilt and repackaged with `LOCALVERSION=` as usual.
+
 ## Building and booting
 
 For a full step-by-step walkthrough — toolchain setup on a clean Debian 13
@@ -346,7 +359,7 @@ files the rescue loader itself never reads, kept alongside for
 convenience when deploying the same build onto the full installed OS:
 `modules.tar.xz` (tarred from *inside* `INSTALL_MOD_PATH/lib/modules/`,
 i.e. `cd .../lib/modules && tar -cJf modules.tar.xz .`, so the archive
-root is `./6.18.4X+/...` — extracting with `tar -C /lib/modules -xf
+root is `./6.18.5X/...` — extracting with `tar -C /lib/modules -xf
 modules.tar.xz` lands the version directory directly at the right
 path) and `.config` (the exact `.config` this build was made from).
 
@@ -359,9 +372,12 @@ with this port's own storage-module load-order/timing fixes on top
 (see below). `initramfs/lib/modules/*.ko` (the three modules `init`
 `insmod`s by hand) are **not** committed — they're kernel-version-tied
 build output, not source; run `tools/monarch/sync-storage-modules.sh`
-after `make modules` and before `make Image` to (re)populate them from
-the just-built tree, every time, including after a base-version rebase
-(see "Updating the base version" below).
+after `make modules` to (re)populate them from the just-built tree,
+every time, including after a base-version rebase (see "Updating the
+base version" below). This has no effect on `Image` itself —
+`CONFIG_INITRAMFS_SOURCE=""`, so the initrd is never baked into `Image`
+at build time — it only matters before the separate
+`rescue.root.sata.cpio.gz_pad.img` initrd gets (re)packaged.
 
 Three of this board's drivers — `phy-rtk-sata`, `usb-storage`, `uas` — are
 built as modules rather than built-in (see "Config" below), so the
@@ -513,8 +529,9 @@ tools/monarch/sync-storage-modules.sh
 make LOCALVERSION= modules_install INSTALL_MOD_PATH=<staging dir>
 ```
 
-`sync-storage-modules.sh` refreshes `initramfs/lib/modules/*.ko`
-*before* the next `make Image` in this same invocation (order matters
-— the initramfs is baked into `Image` at that step); the separate
-`rescue.root.sata.cpio.gz_pad.img` initrd, if that path is also used,
-needs re-packing from the same now-current `initramfs/` tree too.
+`sync-storage-modules.sh` refreshes `initramfs/lib/modules/*.ko` from
+the modules just built above. It has no effect on `Image` itself —
+`CONFIG_INITRAMFS_SOURCE=""`, so the initrd is never baked into `Image`
+(see "Building and booting" above) — it only matters for the separate
+`rescue.root.sata.cpio.gz_pad.img` initrd, which needs re-packing from
+the same now-current `initramfs/` tree too, if that path is also used.
