@@ -8,7 +8,6 @@
  *  Copyright (C) 1998-2024  Ingo Molnar, Red Hat
  */
 #define INSTANTIATE_EXPORTED_MIGRATE_DISABLE
-#include <linux/cma.h>
 #include <linux/sched.h>
 #include <linux/highmem.h>
 #include <linux/hrtimer_api.h>

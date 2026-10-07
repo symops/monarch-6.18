@@ -5,7 +5,6 @@
  * DMA operations that map physical memory directly without using an IOMMU.
  */
 #include <linux/memblock.h> /* for max_pfn */
-#include <linux/delay.h>
 #include <linux/export.h>
 #include <linux/mm.h>
 #include <linux/dma-map-ops.h>

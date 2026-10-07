@@ -276,9 +276,10 @@
 	 * which has no mainline gpiolib controller in this port -- reg[1]/
 	 * reg[2] (DATO/DIR) plus wd,misc-gpio-vbus-bit are the raw-MMIO path
 	 * for that one bit; rtk_iso_gpio line 1 is a normal gpiod consumer,
-	 * same as Duo's lines. Not yet hardware-tested on Monarch (Duo's
-	 * equivalent needed a several-second hold, not a brief pulse, to
-	 * show any effect at all -- see wdmc-poweroff.c's header comment).
+	 * same as Duo's lines. Confirmed on real Monarch hardware (see
+	 * README.md's poweroff section) -- like Duo's equivalent, needed
+	 * a several-second hold, not a brief pulse, to show any effect at
+	 * all (see wdmc-poweroff.c's header comment).
 	 */
 	poweroff: poweroff@70d0 {
 		compatible = "wd,mycloud-home-poweroff";

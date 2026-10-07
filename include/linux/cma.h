@@ -22,14 +22,6 @@
 
 struct cma;
 
-/*
- * AHCI CPU0-interrupt-loss hang workaround, shared between
- * symops/pelican-6.18 (WD My Cloud Home Duo) and symops/monarch-6.18
- * (WD My Cloud Home) -- see pelican-6.18's README.md. See mm/cma.c,
- * kernel/sched/core.c.
- */
-extern unsigned long cma_diag_race_shift_calls;
-
 extern unsigned long totalcma_pages;
 extern phys_addr_t cma_get_base(const struct cma *cma);
 extern unsigned long cma_get_size(const struct cma *cma);

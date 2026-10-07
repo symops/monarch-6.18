@@ -287,8 +287,9 @@ chmod 755 /bin/poweroff-now
 # PHY_RTK_RTD_SATAPHY / USB_STORAGE / USB_UAS are built as modules (not
 # built-in); insmod them before anything tries to touch /dev/sd* -- SATA
 # won't link and USB mass storage won't bind without their driver loaded.
-# No modprobe/depmod: none of these three depend on each other, so plain
-# insmod with an explicit path is enough.
+# No modprobe/depmod here, so load order matters: phy-rtk-sata has no
+# dependency on the other two, but uas depends on usb-storage, so plain
+# insmod with an explicit path only works in this order.
 kmsg() {
   echo "<6>initramfs: $*" > /dev/kmsg 2>/dev/null
 }
