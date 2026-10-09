@@ -185,6 +185,14 @@ static int rtk_spi_nor_read_reg(struct spi_nor *nor, u8 opcode, u8 *buf,
 		 * unconditional `len`-byte copy did (RDSR only ever wants 1).
 		 */
 		writel(0x00000010, host->regbase + SFC_CTL);
+		/*
+		 * Discard the first read, as the vendor driver does: right
+		 * after boot it can return a stale byte ahead of the real
+		 * response (seen on a GigaDevice GD25Q80, answering
+		 * "c0 c8 40 14" instead of "c8 40 14" on the very first RDID
+		 * after the boot loader).
+		 */
+		readl(host->iobase);
 		val = readl(host->iobase);
 		memcpy(buf, &val, min_t(size_t, len, sizeof(val)));
 		break;
