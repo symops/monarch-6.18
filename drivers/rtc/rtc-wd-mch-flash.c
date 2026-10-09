@@ -49,6 +49,20 @@ struct wd_rtc_blob {
 #define WD_RTC_WAIT_MTD_DELAY_MS 10
 #define WD_RTC_DEFAULT_YEAR	2021
 
+/*
+ * set_time() erases the whole sector on every call, and CONFIG_RTC_SYSTOHC
+ * drives it every 11 minutes while the clock stays NTP-synchronised -- about
+ * 131 erases/day, enough to wear out this one-sector-of-flash RTC storage
+ * (100k erase cycles rated) in roughly two years. The flash only ever holds
+ * the time of the last write, not a running clock (a power cut already
+ * loses the time the board was off), so writing far less often costs
+ * nothing real: throttle to once a day. (The vendor driver had the same
+ * throttle, via FLASH_WRITE_LIMIT -- just set to 0 there.)
+ */
+#define WD_RTC_WRITE_INTERVAL_SEC (24ULL * 60 * 60)
+
+static time64_t wd_rtc_last_write;
+
 static int wd_rtc_read_time(struct device *dev, struct rtc_time *tm)
 {
 	struct wd_rtc_blob blob = { 0 };
@@ -88,7 +102,13 @@ static int wd_rtc_set_time(struct device *dev, struct rtc_time *tm)
 	struct mtd_info *mtd;
 	struct erase_info ei = { 0 };
 	size_t retlen;
+	time64_t now;
 	int ret;
+
+	now = rtc_tm_to_time64(tm);
+	if (wd_rtc_last_write &&
+	    now - wd_rtc_last_write < WD_RTC_WRITE_INTERVAL_SEC)
+		return 0;
 
 	mtd = get_mtd_device(NULL, WD_RTC_MTD_INDEX);
 	if (IS_ERR(mtd)) {
@@ -96,7 +116,7 @@ static int wd_rtc_set_time(struct device *dev, struct rtc_time *tm)
 		return PTR_ERR(mtd);
 	}
 
-	blob.seconds = (u32)rtc_tm_to_time64(tm);
+	blob.seconds = (u32)now;
 	blob.seconds_inv = blob.seconds ^ UINT_MAX;
 
 	ei.addr = WD_RTC_MTD_OFFSET;
@@ -114,6 +134,8 @@ static int wd_rtc_set_time(struct device *dev, struct rtc_time *tm)
 		dev_err(dev, "flash write failed: %d\n", ret);
 		if (!ret)
 			ret = -EIO;
+	} else {
+		wd_rtc_last_write = now;
 	}
 
 out:
