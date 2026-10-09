@@ -107,9 +107,14 @@ static int __maybe_unused mux_set_affinity(struct irq_data *d,
 	bool force)
 {
 	struct irq_mux_data *mux_data = irq_data_get_irq_chip_data(d);
-	struct irq_chip *chip = irq_get_chip(mux_data->irq);
-	struct irq_data *data = irq_get_irq_data(mux_data->irq);
+	struct irq_chip *chip;
+	struct irq_data *data;
 	int ret;
+
+	/* As in the mask/unmask/disable callbacks: chip data points at mux 0 */
+	mux_data += (d->hwirq / IRQ_INMUX);
+	chip = irq_get_chip(mux_data->irq);
+	data = irq_get_irq_data(mux_data->irq);
 
 	if (!chip || !chip->irq_set_affinity)
 		return -EINVAL;
