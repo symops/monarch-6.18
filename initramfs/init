@@ -20,43 +20,15 @@ is_mounted() {
 }
 
 # ---------------------------------------------------------------- netrescue
-# A serial cable is not always available. When the user asks for it by
-# dropping a "netrescue" marker file on any FAT-formatted partition, bring
-# up the network and offer a telnet root shell so the box can be repaired
-# remotely.
+# A serial cable is not always available, so bring up the network and
+# offer a telnet root shell + ftp unconditionally on every boot -- not
+# gated behind a marker file or a connected USB stick, no disk/flash
+# drive of any kind required.
 #
-# NOTE: the rescue shell is unauthenticated. It is one-shot (the marker is
-# consumed on use).
-#
-# No fixed device/partition number here on purpose: this used to be a
-# specific partition on a rescue USB stick (back when that stick was
-# required to boot at all), but this image is now the permanent rootfs and
-# nothing guarantees a USB stick -- or any particular disk layout -- is
-# plugged in. Scan every partition that shows up and try each as vfat
-# instead.
-CFG_MNT=/cfg
-
-rescue_marker_present() {
-  mkdir -p "$CFG_MNT"
-  for dev in /dev/sd*[0-9] /dev/mmcblk*p*; do
-    [ -b "$dev" ] || continue
-    mount -t vfat "$dev" "$CFG_MNT" 2>/dev/null || continue
-    if [ -f "$CFG_MNT/netrescue" ]; then
-      rm -f "$CFG_MNT/netrescue"        # one-shot: never strand the box here
-      sync
-      umount "$CFG_MNT" 2>/dev/null
-      return 0
-    fi
-    umount "$CFG_MNT" 2>/dev/null
-  done
-  return 1
-}
-
+# NOTE: the rescue shell is unauthenticated.
 start_netrescue() {
-  reason="$1"
   echo ""
   echo "[initramfs] ===== NETWORK RESCUE MODE ====="
-  echo "[initramfs] reason: $reason"
 
   [ -d /etc ] || mkdir -p /etc
   [ -f /etc/passwd ] || echo "root::0:0:root:/:/bin/sh" > /etc/passwd
@@ -170,9 +142,7 @@ enable_usb_power
 
 echo "[initramfs] booted. kernel cmdline: $(cat /proc/cmdline)"
 
-if rescue_marker_present; then
-  start_netrescue "requested via netrescue marker file"
-fi
+start_netrescue
 echo "[initramfs] quick reboot: reboot -f  or  reboot-now"
 
 # ahci_rtd1295 only finishes probing (and SATA link-up/negotiation) after
