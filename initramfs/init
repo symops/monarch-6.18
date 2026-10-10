@@ -21,25 +21,34 @@ is_mounted() {
 
 # ---------------------------------------------------------------- netrescue
 # A serial cable is not always available. When the user asks for it by
-# dropping a "netrescue" marker file on the FAT32 CONFIG partition, bring
+# dropping a "netrescue" marker file on any FAT-formatted partition, bring
 # up the network and offer a telnet root shell so the box can be repaired
 # remotely.
 #
 # NOTE: the rescue shell is unauthenticated. It is one-shot (the marker is
 # consumed on use).
-CFG_DEV=/dev/sda18
+#
+# No fixed device/partition number here on purpose: this used to be a
+# specific partition on a rescue USB stick (back when that stick was
+# required to boot at all), but this image is now the permanent rootfs and
+# nothing guarantees a USB stick -- or any particular disk layout -- is
+# plugged in. Scan every partition that shows up and try each as vfat
+# instead.
 CFG_MNT=/cfg
 
 rescue_marker_present() {
   mkdir -p "$CFG_MNT"
-  mount -t vfat "$CFG_DEV" "$CFG_MNT" 2>/dev/null || return 1
-  if [ -f "$CFG_MNT/netrescue" ]; then
-    rm -f "$CFG_MNT/netrescue"        # one-shot: never strand the box here
-    sync
+  for dev in /dev/sd*[0-9] /dev/mmcblk*p*; do
+    [ -b "$dev" ] || continue
+    mount -t vfat "$dev" "$CFG_MNT" 2>/dev/null || continue
+    if [ -f "$CFG_MNT/netrescue" ]; then
+      rm -f "$CFG_MNT/netrescue"        # one-shot: never strand the box here
+      sync
+      umount "$CFG_MNT" 2>/dev/null
+      return 0
+    fi
     umount "$CFG_MNT" 2>/dev/null
-    return 0
-  fi
-  umount "$CFG_MNT" 2>/dev/null
+  done
   return 1
 }
 
@@ -162,7 +171,7 @@ enable_usb_power
 echo "[initramfs] booted. kernel cmdline: $(cat /proc/cmdline)"
 
 if rescue_marker_present; then
-  start_netrescue "requested via netrescue marker on the CONFIG partition"
+  start_netrescue "requested via netrescue marker file"
 fi
 echo "[initramfs] quick reboot: reboot -f  or  reboot-now"
 
@@ -171,8 +180,8 @@ echo "[initramfs] quick reboot: reboot -f  or  reboot-now"
 # whole process reliably takes several seconds. Without this wait, mdadm
 # assembly below can run before the disk is attached. host1/host2 are
 # ahci_rtd1295's fixed SCSI host numbers on this SoC, so this doesn't
-# depend on which /dev/sd? letter the kernel ends up assigning (the
-# rescue USB stick itself claims sda).
+# depend on which /dev/sd? letter the kernel ends up assigning (e.g. if a
+# USB storage device also happens to be plugged in and grabs sda first).
 wait_for_sata_disk() {
   echo "[initramfs] waiting for SATA disk to link up..."
   i=0
