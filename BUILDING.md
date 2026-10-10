@@ -10,7 +10,7 @@ sudo apt install -y \
     git make bc bison flex \
     gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
     libssl-dev libelf-dev \
-    python3 cpio gzip pigz kmod rsync
+    python3 cpio gzip pigz xz-utils kmod rsync
 ```
 
 No `u-boot-tools`/`mkimage` is needed — despite the `.uImage` filename, this board's bootloader does **not** use the mkimage/FIT format; it's a raw patched `Image`. Device-tree compiler is also not required system-wide: the kernel build tree compiles its own `scripts/dtc` from source.
@@ -91,7 +91,7 @@ Despite the `.uImage` name, this is just the patched, gzip'd raw `Image` — no 
 
 ```sh
 ( cd initramfs && find . | cpio -o -H newc > /tmp/rescue.root.cpio )
-gzip -9 -f -k -c /tmp/rescue.root.cpio > /tmp/rescue.root.cpio.gz
+pigz -11 -f -k -c /tmp/rescue.root.cpio > /tmp/rescue.root.cpio.gz
 python3 -c "
 data = open('/tmp/rescue.root.cpio.gz', 'rb').read()
 target = 4194304
