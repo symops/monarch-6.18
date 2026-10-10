@@ -1,26 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Cosmetic power-off for WD My Cloud Home (Monarch, RTD1295) and WD My
- * Cloud Home Duo (Pelican, RTD1296).
- *
- * Neither this SoC's mainline support nor the vendor 4.9.330 GPL source
- * implements a real hardware power-off for this board: the DTS used to
- * carry a "realtek,rtd129x-coolboot-poweroff" node, but that compatible
- * string matches no driver anywhere, mainline or vendor (checked both
- * trees directly -- see README.md). The vendor's own g2227-regulator.c
- * .shutdown() hook (already ported byte-for-byte,
- * drivers/regulator/g2227-regulator.c) only sequences down the PMIC's
- * own core-voltage rails as the SoC's last act before something
- * EXTERNAL is expected to cut the board's main 12V feed -- and no such
- * external trigger (a "power hold"/"pwr_en" GPIO) was found anywhere in
- * either board's vendor DTS. `halt`/`poweroff` on this hardware
- * therefore both just park the CPU with the board still fully powered:
- * fan spinning, front LED lit, USB VBUS live.
- *
- * This driver does not attempt to cut real board power -- there is
- * currently no known way to do that from software on this hardware. It
- * quiets the things under this SoC's own direct control that otherwise
- * stay conspicuously live.
+ * Power-off for WD My Cloud Home (Monarch, RTD1295) and WD My Cloud Home
+ * Duo (Pelican, RTD1296), as WD's 4.9 kernel does it: the G2227 PMIC is
+ * set to turn off all but 3.3 V and the ISO domain in sleep, and the audio
+ * CPU firmware, asked to "suspend to coolboot", puts it to sleep. Before
+ * that the driver turns off what the SoC drives directly and disarms the
+ * watchdog:
  *
  *  - PWM channel(s) for the SYS LED (and fan, Duo only): the OCD
  *    register (offset 0x0 within the pwm@d0 block) with 0 written to a
@@ -70,15 +55,46 @@
  */
 
 #include <linux/bitops.h>
+#include <linux/delay.h>
 #include <linux/gpio/consumer.h>
+#include <linux/i2c.h>
 #include <linux/io.h>
 #include <linux/module.h>
 #include <linux/of.h>
+#include <linux/of_address.h>
 #include <linux/platform_device.h>
 #include <linux/reboot.h>
 
 #define WDMC_PWM_OCD		0x0
 #define WDMC_MAX_PWM_CHANNELS	4
+
+#define WDMC_WDT_EN_MASK	0xff
+#define WDMC_WDT_DISABLED	0xa5
+
+#define WDMC_UART_MCR		0x10
+#define WDMC_UART_LSR		0x14
+#define WDMC_UART_MCR_LOOP	BIT(4)
+#define WDMC_UART_LSR_TEMT	BIT(6)
+
+/* ISO pad mux: I2C0's SCL (bits 23:22) and SDA (25:24) to function 1, I2C */
+#define WDMC_ISO_MUX_I2C0_MASK	(0xf << 22)
+#define WDMC_ISO_MUX_I2C0	(0x5 << 22)
+
+/* struct rtk_ipc_shm (WD 4.9 rtk_ipc_shm.h) at 0xc4 into the RPC page, big-endian */
+#define WDMC_IPC_AUDIO_RPC_FLAG	(0xc4 + 0x0c)
+#define WDMC_IPC_SUSPEND_MASK	(0xc4 + 0x10)
+#define WDMC_IPC_SUSPEND_FLAG	(0xc4 + 0x14)
+
+/* G2227 sleep-mode fields set to 3, off: DC2 (CPU), DC3 (GPU), DC4 (DDR), DC6 (TOP), LDO2, LDO3 */
+static const struct {
+	u8 reg;
+	u8 off;
+} wdmc_pmic_sleep_off[] = {
+	{ 0x07, 0x03 },
+	{ 0x08, 0x33 },
+	{ 0x09, 0x03 },
+	{ 0x0a, 0x33 },
+};
 
 struct wdmc_poweroff_data {
 	void __iomem *pwm_base;
@@ -86,6 +102,12 @@ struct wdmc_poweroff_data {
 	void __iomem *misc_gpio_dato;
 	void __iomem *misc_gpio_dir;
 	unsigned int misc_gpio_vbus_bit;
+	int misc_gpio_hdd_bit;
+	void __iomem *wdt_ctl;
+	void __iomem *uart;
+	void __iomem *iso_mux;
+	void __iomem *ipc;
+	struct device_node *pmic;
 	unsigned int pwm_channels[WDMC_MAX_PWM_CHANNELS];
 	unsigned int n_pwm_channels;
 };
@@ -133,14 +155,88 @@ static void wdmc_poweroff_handler(void)
 		for (i = 0; i < wdmc_poweroff->usb_vbus_gpios->ndescs; i++)
 			gpiod_direction_output(wdmc_poweroff->usb_vbus_gpios->desc[i], 0);
 	}
+
+	if (wdmc_poweroff->misc_gpio_hdd_bit >= 0) {
+		u32 bit = BIT(wdmc_poweroff->misc_gpio_hdd_bit);
+
+		writel(readl(wdmc_poweroff->misc_gpio_dir) | bit, wdmc_poweroff->misc_gpio_dir);
+		writel(readl(wdmc_poweroff->misc_gpio_dato) & ~bit, wdmc_poweroff->misc_gpio_dato);
+	}
+
+	if (wdmc_poweroff->wdt_ctl) {
+		val = readl(wdmc_poweroff->wdt_ctl) & ~WDMC_WDT_EN_MASK;
+		writel(val | WDMC_WDT_DISABLED, wdmc_poweroff->wdt_ctl);
+	}
+
+	if (wdmc_poweroff->ipc) {
+		void __iomem *ipc = wdmc_poweroff->ipc;
+		void __iomem *uart = wdmc_poweroff->uart;
+
+		/* The firmware prints on UART0 before taking the request: loop it back to drain */
+		if (uart) {
+			for (i = 0; i < 10000; i++) {
+				if (readl(uart + WDMC_UART_LSR) & WDMC_UART_LSR_TEMT)
+					break;
+				udelay(10);
+			}
+			val = readl(uart + WDMC_UART_MCR);
+			writel(val | WDMC_UART_MCR_LOOP, uart + WDMC_UART_MCR);
+		}
+
+		/* Suspend version 2, author SCPU, coolboot; the firmware clears the request */
+		iowrite32be(0x00020000, ipc + WDMC_IPC_SUSPEND_MASK);
+		iowrite32be(0x40000002, ipc + WDMC_IPC_SUSPEND_FLAG);
+		iowrite32be(0xdeadffff, ipc + WDMC_IPC_AUDIO_RPC_FLAG);
+		for (i = 0; i < 1000 && ioread32be(ipc + WDMC_IPC_AUDIO_RPC_FLAG); i++)
+			mdelay(1);
+		pr_emerg("wdmc-poweroff: the audio CPU %s the power-off request\n",
+			 i < 1000 ? "took" : "did not take");
+	}
+
+	for (;;)
+		wfi();
+}
+
+/* The sleep modes act only in sleep; set them for a power-off, while I2C works */
+static void wdmc_poweroff_shutdown(struct platform_device *pdev)
+{
+	struct wdmc_poweroff_data *data = platform_get_drvdata(pdev);
+	struct i2c_client *pmic;
+	int i, val = 0;
+
+	if (system_state != SYSTEM_POWER_OFF || !data || !data->pmic || !data->iso_mux)
+		return;
+
+	pmic = of_find_i2c_device_by_node(data->pmic);
+	if (!pmic) {
+		dev_warn(&pdev->dev, "no PMIC on I2C: the rails stay on after power-off\n");
+		return;
+	}
+
+	/* U-Boot leaves I2C0's pads as GPIOs */
+	writel((readl(data->iso_mux) & ~WDMC_ISO_MUX_I2C0_MASK) | WDMC_ISO_MUX_I2C0,
+	       data->iso_mux);
+
+	for (i = 0; i < ARRAY_SIZE(wdmc_pmic_sleep_off) && val >= 0; i++) {
+		val = i2c_smbus_read_byte_data(pmic, wdmc_pmic_sleep_off[i].reg);
+		if (val >= 0)
+			val = i2c_smbus_write_byte_data(pmic, wdmc_pmic_sleep_off[i].reg,
+							val | wdmc_pmic_sleep_off[i].off);
+	}
+	if (val < 0)
+		dev_warn(&pdev->dev, "cannot set the PMIC's sleep modes: %d\n", val);
+
+	put_device(&pmic->dev);
 }
 
 static int wdmc_poweroff_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct wdmc_poweroff_data *data;
+	struct device_node *rmem;
 	struct resource *res;
 	int ret, i;
+	u32 bit;
 
 	data = devm_kzalloc(dev, sizeof(*data), GFP_KERNEL);
 	if (!data)
@@ -175,6 +271,39 @@ static int wdmc_poweroff_probe(struct platform_device *pdev)
 					      "bad or missing wd,misc-gpio-vbus-bit\n");
 	}
 
+	data->misc_gpio_hdd_bit = -1;
+	if (data->misc_gpio_dir && data->misc_gpio_dato &&
+	    !of_property_read_u32(dev->of_node, "wd,misc-gpio-hdd-bit", &bit)) {
+		if (bit >= 32)
+			return dev_err_probe(dev, -EINVAL, "bad wd,misc-gpio-hdd-bit\n");
+		data->misc_gpio_hdd_bit = bit;
+	}
+
+	/* reg[3] watchdog control, reg[4] UART0, reg[5] ISO pad mux: all optional */
+	res = platform_get_resource(pdev, IORESOURCE_MEM, 3);
+	if (res && !(data->wdt_ctl = devm_ioremap(dev, res->start, resource_size(res))))
+		return -ENOMEM;
+	res = platform_get_resource(pdev, IORESOURCE_MEM, 4);
+	if (res && !(data->uart = devm_ioremap(dev, res->start, resource_size(res))))
+		return -ENOMEM;
+	res = platform_get_resource(pdev, IORESOURCE_MEM, 5);
+	if (res && !(data->iso_mux = devm_ioremap(dev, res->start, resource_size(res))))
+		return -ENOMEM;
+
+	/* The RPC page must be no-map: the audio CPU reads it uncached */
+	rmem = of_parse_phandle(dev->of_node, "memory-region", 0);
+	if (rmem) {
+		struct resource ipc;
+
+		ret = of_address_to_resource(rmem, 0, &ipc);
+		of_node_put(rmem);
+		if (ret)
+			return dev_err_probe(dev, ret, "bad memory-region\n");
+		data->ipc = devm_ioremap(dev, ipc.start, resource_size(&ipc));
+		if (!data->ipc)
+			return dev_err_probe(dev, -ENOMEM, "cannot map memory-region\n");
+	}
+
 	/*
 	 * GPIOD_ASIS: don't touch the line's current state at probe time
 	 * (the board is already up and these ports are already powered);
@@ -206,19 +335,27 @@ static int wdmc_poweroff_probe(struct platform_device *pdev)
 		return dev_err_probe(dev, -EBUSY,
 				      "pm_power_off already claimed\n");
 
+	/* Its I2C adapter is a module that probes later; look the client up at shutdown */
+	data->pmic = of_parse_phandle(dev->of_node, "wd,pmic", 0);
+
 	wdmc_poweroff = data;
 	pm_power_off = wdmc_poweroff_handler;
 	platform_set_drvdata(pdev, data);
 
-	dev_info(dev, "registered as pm_power_off (%u pwm channel(s), %u usb vbus gpio(s))\n",
+	dev_info(dev, "registered as pm_power_off (%u pwm channel(s), %u usb vbus gpio(s)%s%s)\n",
 		 data->n_pwm_channels,
-		 data->usb_vbus_gpios ? data->usb_vbus_gpios->ndescs : 0);
+		 data->usb_vbus_gpios ? data->usb_vbus_gpios->ndescs : 0,
+		 data->ipc ? ", audio CPU coolboot" : "",
+		 data->pmic ? ", PMIC sleep modes" : "");
 
 	return 0;
 }
 
 static void wdmc_poweroff_remove(struct platform_device *pdev)
 {
+	struct wdmc_poweroff_data *data = platform_get_drvdata(pdev);
+
+	of_node_put(data->pmic);
 	if (pm_power_off == wdmc_poweroff_handler) {
 		pm_power_off = NULL;
 		wdmc_poweroff = NULL;
@@ -234,6 +371,7 @@ MODULE_DEVICE_TABLE(of, wdmc_poweroff_of_match);
 static struct platform_driver wdmc_poweroff_driver = {
 	.probe = wdmc_poweroff_probe,
 	.remove = wdmc_poweroff_remove,
+	.shutdown = wdmc_poweroff_shutdown,
 	.driver = {
 		.name = "wdmc-poweroff",
 		.of_match_table = wdmc_poweroff_of_match,
