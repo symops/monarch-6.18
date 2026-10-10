@@ -8821,6 +8821,8 @@ rtl_init_one(struct platform_device *pdev)
 	ndev->hw_features |= NETIF_F_RXALL;
 	ndev->hw_features |= NETIF_F_RXFCS;
 
+	ndev->max_mtu = rtl_chip_infos.jumbo_max;
+
 	tp->hw_start = cfg->hw_start;
 	tp->event_slow = cfg->event_slow;
 
