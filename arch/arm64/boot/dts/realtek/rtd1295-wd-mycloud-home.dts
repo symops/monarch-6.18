@@ -146,11 +146,13 @@
 		interrupt-parent = <&mux_intc>;
 		interrupts = <1 8>;
 		i2c-num = <0>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&i2c0_pins>;
 		status = "okay";
 		#address-cells = <1>;
 		#size-cells = <0>;
 
-		pmic: pmic@12 {
+		pmic@12 {
 			compatible = "gmt,g2227";
 			reg = <0x12>;
 			status = "okay";
@@ -159,14 +161,14 @@
 				compatible = "gmt,g2227-regulator";
 				status = "okay";
 
-				dc1 { regulator-boot-on; regulator-always-on; regulator-name = "vd33"; regulator-min-microvolt = <3000000>; regulator-max-microvolt = <3300000>; regulator-initial-mode = <1>; };
-				dc2 { regulator-boot-on; regulator-always-on; regulator-name = "cpudvs"; regulator-min-microvolt = <800000>; regulator-max-microvolt = <1187500>; regulator-initial-mode = <0>; regulator-state-mem { regulator-off-in-suspend; }; };
-				dc3 { regulator-boot-on; regulator-always-on; regulator-name = "gpudvs"; regulator-min-microvolt = <800000>; regulator-max-microvolt = <1187500>; regulator-initial-mode = <0>; regulator-ramp-delay = <625>; regulator-state-mem { regulator-off-in-suspend; }; };
+				dc1 { regulator-boot-on; regulator-always-on; regulator-name = "vd33"; regulator-min-microvolt = <3300000>; regulator-max-microvolt = <3300000>; regulator-initial-mode = <1>; };
+				dc2 { regulator-boot-on; regulator-always-on; regulator-name = "cpudvs"; regulator-min-microvolt = <800000>; regulator-max-microvolt = <1187500>; regulator-initial-mode = <0>; regulator-state-coldboot { regulator-off-in-suspend; }; };
+				dc3 { regulator-boot-on; regulator-always-on; regulator-name = "gpudvs"; regulator-min-microvolt = <1000000>; regulator-max-microvolt = <1000000>; regulator-initial-mode = <0>; regulator-ramp-delay = <625>; regulator-state-coldboot { regulator-off-in-suspend; }; };
 				dc4 { regulator-boot-on; regulator-always-on; regulator-name = "ddr"; regulator-min-microvolt = <1500000>; regulator-max-microvolt = <1500000>; regulator-initial-mode = <0>; regulator-state-coldboot { regulator-off-in-suspend; }; };
-				dc5 { regulator-boot-on; regulator-always-on; regulator-name = "iso"; regulator-min-microvolt = <800000>; regulator-max-microvolt = <1187500>; regulator-initial-mode = <0>; };
-				dc6 { regulator-boot-on; regulator-always-on; regulator-name = "top"; regulator-min-microvolt = <800000>; regulator-max-microvolt = <1187500>; regulator-initial-mode = <0>; regulator-state-mem { regulator-off-in-suspend; }; };
-				ldo2 { regulator-boot-on; regulator-always-on; regulator-name = "ldo2"; regulator-min-microvolt = <1500000>; regulator-max-microvolt = <1900000>; regulator-initial-mode = <0>; regulator-state-mem { regulator-off-in-suspend; }; };
-				ldo3 { regulator-boot-on; regulator-always-on; regulator-name = "ldo3"; regulator-min-microvolt = <800000>; regulator-max-microvolt = <1200000>; regulator-initial-mode = <0>; regulator-state-mem { regulator-off-in-suspend; }; };
+				dc5 { regulator-boot-on; regulator-always-on; regulator-name = "iso"; regulator-min-microvolt = <1000000>; regulator-max-microvolt = <1000000>; regulator-initial-mode = <0>; };
+				dc6 { regulator-boot-on; regulator-always-on; regulator-name = "top"; regulator-min-microvolt = <1000000>; regulator-max-microvolt = <1000000>; regulator-initial-mode = <0>; regulator-state-coldboot { regulator-off-in-suspend; }; };
+				ldo2 { regulator-boot-on; regulator-always-on; regulator-name = "ldo2"; regulator-min-microvolt = <1800000>; regulator-max-microvolt = <1800000>; regulator-initial-mode = <0>; regulator-state-coldboot { regulator-off-in-suspend; }; };
+				ldo3 { regulator-boot-on; regulator-always-on; regulator-name = "ldo3"; regulator-min-microvolt = <900000>; regulator-max-microvolt = <900000>; regulator-initial-mode = <0>; regulator-state-coldboot { regulator-off-in-suspend; }; };
 			};
 		};
 	};
@@ -292,13 +294,11 @@
 		compatible = "wd,mycloud-home-poweroff";
 		reg = <0x70d0 0x4>,
 		      <0x7680 0x4>,			/* watchdog control */
-		      <0x7800 0x20>,			/* UART0 */
-		      <0x7310 0x4>;			/* ISO pad mux (I2C0) */
+		      <0x7800 0x20>;			/* UART0 */
 		wd,pwm-off-channels = <3>; /* SYS LED only -- no fan on Monarch */
 		wd,usb-vbus-gpios = <&rtk_iso_gpio 1 GPIO_ACTIVE_HIGH>,
 				    <&rtk_misc_gpio 19 GPIO_ACTIVE_HIGH>;
 		memory-region = <&rpc_comm>;		/* IPC with the audio CPU */
-		wd,pmic = <&pmic>;
 		status = "okay";
 	};
 
@@ -678,6 +678,19 @@
 };
 
 &iso {
+	/* No RTD1295 pin controller in 6.18; U-Boot leaves I2C0's pads as GPIOs */
+	pinmux@310 {
+		compatible = "pinctrl-single";
+		reg = <0x310 0x4>;
+		#pinctrl-cells = <1>;
+		pinctrl-single,register-width = <32>;
+		pinctrl-single,function-mask = <0x03c00000>;
+
+		i2c0_pins: i2c0-pins {
+			pinctrl-single,pins = <0x0 0x01400000>;	/* SCL, SDA: I2C */
+		};
+	};
+
 	pwm: pwm@d0 {
 		compatible = "realtek,rtd129x-pwm";
 		reg = <0xd0 0xc>;
