@@ -162,13 +162,13 @@
 				status = "okay";
 
 				dc1 { regulator-boot-on; regulator-always-on; regulator-name = "vd33"; regulator-min-microvolt = <3300000>; regulator-max-microvolt = <3300000>; regulator-initial-mode = <1>; };
-				dc2 { regulator-boot-on; regulator-always-on; regulator-name = "cpudvs"; regulator-min-microvolt = <800000>; regulator-max-microvolt = <1187500>; regulator-initial-mode = <0>; regulator-state-coldboot { regulator-off-in-suspend; }; };
+				cpu_supp: dc2 { regulator-boot-on; regulator-always-on; regulator-name = "cpudvs"; regulator-min-microvolt = <825000>; regulator-max-microvolt = <1100000>; regulator-ramp-delay = <300>; regulator-coupled-with = <&l2_supp>; regulator-coupled-max-spread = <100000>; regulator-initial-mode = <0>; regulator-state-coldboot { regulator-off-in-suspend; }; };
 				dc3 { regulator-boot-on; regulator-always-on; regulator-name = "gpudvs"; regulator-min-microvolt = <1000000>; regulator-max-microvolt = <1000000>; regulator-initial-mode = <0>; regulator-ramp-delay = <625>; regulator-state-coldboot { regulator-off-in-suspend; }; };
 				dc4 { regulator-boot-on; regulator-always-on; regulator-name = "ddr"; regulator-min-microvolt = <1500000>; regulator-max-microvolt = <1500000>; regulator-initial-mode = <0>; regulator-state-coldboot { regulator-off-in-suspend; }; };
 				dc5 { regulator-boot-on; regulator-always-on; regulator-name = "iso"; regulator-min-microvolt = <1000000>; regulator-max-microvolt = <1000000>; regulator-initial-mode = <0>; };
 				dc6 { regulator-boot-on; regulator-always-on; regulator-name = "top"; regulator-min-microvolt = <1000000>; regulator-max-microvolt = <1000000>; regulator-initial-mode = <0>; regulator-state-coldboot { regulator-off-in-suspend; }; };
 				ldo2 { regulator-boot-on; regulator-always-on; regulator-name = "ldo2"; regulator-min-microvolt = <1800000>; regulator-max-microvolt = <1800000>; regulator-initial-mode = <0>; regulator-state-coldboot { regulator-off-in-suspend; }; };
-				ldo3 { regulator-boot-on; regulator-always-on; regulator-name = "ldo3"; regulator-min-microvolt = <900000>; regulator-max-microvolt = <900000>; regulator-initial-mode = <0>; regulator-state-coldboot { regulator-off-in-suspend; }; };
+				l2_supp: ldo3 { regulator-boot-on; regulator-always-on; regulator-name = "ldo3"; regulator-min-microvolt = <900000>; regulator-max-microvolt = <1000000>; regulator-ramp-delay = <300>; regulator-coupled-with = <&cpu_supp>; regulator-coupled-max-spread = <100000>; regulator-initial-mode = <0>; regulator-state-coldboot { regulator-off-in-suspend; }; };
 			};
 		};
 	};
@@ -786,33 +786,36 @@
 };
 
 /*
- * cpufreq: divider-only scaling below the boot operating point.  The
- * boot loader leaves PLL_SCPU at 1201.5 MHz with the post-divider at
- * /2, so this board has always run at 600.75 MHz; the OPPs are that
- * proven point and its half.  No opp-microvolt on purpose: the cpudvs
- * rail is never touched, both OPPs are safe at whatever voltage the
- * board booted with.
+ * cpufreq: WD's operating points. The boot loader's PLL setting reads
+ * back as 1200 MHz, /2, so the boot state is the 600 MHz OPP. The OPPs
+ * set the cpudvs rail (DC2); the L2 rail (LDO3) follows it through the
+ * regulators' coupling, which needs the OPPs' voltage range (target,
+ * min, max) to step both rails.
  */
 &cpu0 {
 	clocks = <&scpu_clk>;
+	cpu-supply = <&cpu_supp>;
 	#cooling-cells = <2>;
 	operating-points-v2 = <&cpu_opps>;
 };
 
 &cpu1 {
 	clocks = <&scpu_clk>;
+	cpu-supply = <&cpu_supp>;
 	#cooling-cells = <2>;
 	operating-points-v2 = <&cpu_opps>;
 };
 
 &cpu2 {
 	clocks = <&scpu_clk>;
+	cpu-supply = <&cpu_supp>;
 	#cooling-cells = <2>;
 	operating-points-v2 = <&cpu_opps>;
 };
 
 &cpu3 {
 	clocks = <&scpu_clk>;
+	cpu-supply = <&cpu_supp>;
 	#cooling-cells = <2>;
 	operating-points-v2 = <&cpu_opps>;
 };
@@ -822,19 +825,34 @@
 		compatible = "operating-points-v2";
 		opp-shared;
 
-		opp-300375000 {
-			opp-hz = /bits/ 64 <300375000>;
-			clock-latency-ns = <150000>;
-		};
-
-		opp-600750000 {
-			opp-hz = /bits/ 64 <600750000>;
-			clock-latency-ns = <150000>;
+		opp-600000000 {
+			opp-hz = /bits/ 64 <600000000>;
+			opp-microvolt = <825000 825000 1100000>;
+			clock-latency-ns = <300000>;
 			opp-suspend;
 		};
 
-		opp-1100000000 {
-			opp-hz = /bits/ 64 <1100000000>;
+		opp-800000000 {
+			opp-hz = /bits/ 64 <800000000>;
+			opp-microvolt = <875000 875000 1100000>;
+			clock-latency-ns = <300000>;
+		};
+
+		opp-1000000000 {
+			opp-hz = /bits/ 64 <1000000000>;
+			opp-microvolt = <925000 925000 1100000>;
+			clock-latency-ns = <300000>;
+		};
+
+		opp-1200000000 {
+			opp-hz = /bits/ 64 <1200000000>;
+			opp-microvolt = <1012500 1012500 1100000>;
+			clock-latency-ns = <300000>;
+		};
+
+		opp-1400000000 {
+			opp-hz = /bits/ 64 <1400000000>;
+			opp-microvolt = <1100000 1100000 1100000>;
 			clock-latency-ns = <300000>;
 		};
 	};
