@@ -43,15 +43,14 @@
  *    either line (only line 20, the Reset button, is otherwise spoken
  *    for). Monarch's stock-firmware log shows a completely different
  *    split: one port on a single misc-gpio bit (19), the other two
- *    (sharing one physical port) on rtk_iso_gpio line 1. misc-gpio has
- *    no mainline gpiolib controller in this port (raw MMIO only, same
- *    style as the PWM OCD poke above and ahci_rtd1295.c's own SB2 gate)
- *    so wd,misc-gpio-vbus-bit's DIR/DATO windows are optional raw pokes,
- *    independent of and in addition to wd,usb-vbus-gpios's gpiod array.
+ *    (sharing one physical port) on rtk_iso_gpio line 1. All of them are
+ *    wd,usb-vbus-gpios: this driver holds them high while the system runs
+ *    and drives them low at power-off.
  *
  * Real disk spin-down is handled separately, through the SCSI layer's
  * own existing sd_shutdown() mechanism (the manage_shutdown sysfs
- * attribute, enabled via udev at boot) rather than reimplemented here.
+ * attribute, enabled via udev at boot) rather than reimplemented here;
+ * ahci_rtd1295 then turns off the disk's supply.
  */
 
 #include <linux/bitops.h>
@@ -99,10 +98,6 @@ static const struct {
 struct wdmc_poweroff_data {
 	void __iomem *pwm_base;
 	struct gpio_descs *usb_vbus_gpios;
-	void __iomem *misc_gpio_dato;
-	void __iomem *misc_gpio_dir;
-	unsigned int misc_gpio_vbus_bit;
-	int misc_gpio_hdd_bit;
 	void __iomem *wdt_ctl;
 	void __iomem *uart;
 	void __iomem *iso_mux;
@@ -130,21 +125,6 @@ static void wdmc_poweroff_handler(void)
 		writel(val, wdmc_poweroff->pwm_base + WDMC_PWM_OCD);
 	}
 
-	if (wdmc_poweroff->misc_gpio_dir && wdmc_poweroff->misc_gpio_dato) {
-		unsigned int bit = wdmc_poweroff->misc_gpio_vbus_bit;
-
-		/* Force the pad to output mode ourselves, same reasoning
-		 * as the gpiod lines below: don't depend on anything
-		 * upstream having already done it.
-		 */
-		val = readl(wdmc_poweroff->misc_gpio_dir);
-		writel(val | BIT(bit), wdmc_poweroff->misc_gpio_dir);
-
-		val = readl(wdmc_poweroff->misc_gpio_dato);
-		val &= ~BIT(bit);
-		writel(val, wdmc_poweroff->misc_gpio_dato);
-	}
-
 	if (wdmc_poweroff->usb_vbus_gpios) {
 		/*
 		 * Confirmed on real hardware that this needs to actually
@@ -154,13 +134,6 @@ static void wdmc_poweroff_handler(void)
 		 */
 		for (i = 0; i < wdmc_poweroff->usb_vbus_gpios->ndescs; i++)
 			gpiod_direction_output(wdmc_poweroff->usb_vbus_gpios->desc[i], 0);
-	}
-
-	if (wdmc_poweroff->misc_gpio_hdd_bit >= 0) {
-		u32 bit = BIT(wdmc_poweroff->misc_gpio_hdd_bit);
-
-		writel(readl(wdmc_poweroff->misc_gpio_dir) | bit, wdmc_poweroff->misc_gpio_dir);
-		writel(readl(wdmc_poweroff->misc_gpio_dato) & ~bit, wdmc_poweroff->misc_gpio_dato);
 	}
 
 	if (wdmc_poweroff->wdt_ctl) {
@@ -236,7 +209,6 @@ static int wdmc_poweroff_probe(struct platform_device *pdev)
 	struct device_node *rmem;
 	struct resource *res;
 	int ret, i;
-	u32 bit;
 
 	data = devm_kzalloc(dev, sizeof(*data), GFP_KERNEL);
 	if (!data)
@@ -249,44 +221,14 @@ static int wdmc_poweroff_probe(struct platform_device *pdev)
 	if (!data->pwm_base)
 		return -ENOMEM;
 
+	/* reg[1] watchdog control, reg[2] UART0, reg[3] ISO pad mux: all optional */
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 1);
-	if (res) {
-		data->misc_gpio_dato = devm_ioremap(dev, res->start, resource_size(res));
-		if (!data->misc_gpio_dato)
-			return -ENOMEM;
-	}
-
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 2);
-	if (res) {
-		data->misc_gpio_dir = devm_ioremap(dev, res->start, resource_size(res));
-		if (!data->misc_gpio_dir)
-			return -ENOMEM;
-	}
-
-	if (data->misc_gpio_dir && data->misc_gpio_dato) {
-		ret = of_property_read_u32(dev->of_node, "wd,misc-gpio-vbus-bit",
-					    &data->misc_gpio_vbus_bit);
-		if (ret || data->misc_gpio_vbus_bit >= 32)
-			return dev_err_probe(dev, -EINVAL,
-					      "bad or missing wd,misc-gpio-vbus-bit\n");
-	}
-
-	data->misc_gpio_hdd_bit = -1;
-	if (data->misc_gpio_dir && data->misc_gpio_dato &&
-	    !of_property_read_u32(dev->of_node, "wd,misc-gpio-hdd-bit", &bit)) {
-		if (bit >= 32)
-			return dev_err_probe(dev, -EINVAL, "bad wd,misc-gpio-hdd-bit\n");
-		data->misc_gpio_hdd_bit = bit;
-	}
-
-	/* reg[3] watchdog control, reg[4] UART0, reg[5] ISO pad mux: all optional */
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 3);
 	if (res && !(data->wdt_ctl = devm_ioremap(dev, res->start, resource_size(res))))
 		return -ENOMEM;
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 4);
+	res = platform_get_resource(pdev, IORESOURCE_MEM, 2);
 	if (res && !(data->uart = devm_ioremap(dev, res->start, resource_size(res))))
 		return -ENOMEM;
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 5);
+	res = platform_get_resource(pdev, IORESOURCE_MEM, 3);
 	if (res && !(data->iso_mux = devm_ioremap(dev, res->start, resource_size(res))))
 		return -ENOMEM;
 
@@ -304,13 +246,9 @@ static int wdmc_poweroff_probe(struct platform_device *pdev)
 			return dev_err_probe(dev, -ENOMEM, "cannot map memory-region\n");
 	}
 
-	/*
-	 * GPIOD_ASIS: don't touch the line's current state at probe time
-	 * (the board is already up and these ports are already powered);
-	 * the shutdown handler is the only place this ever gets driven.
-	 */
+	/* U-Boot powers USB only when it boots from USB, so raise VBUS here */
 	data->usb_vbus_gpios = devm_gpiod_get_array_optional(dev, "wd,usb-vbus",
-							       GPIOD_ASIS);
+							       GPIOD_OUT_HIGH);
 	if (IS_ERR(data->usb_vbus_gpios))
 		return dev_err_probe(dev, PTR_ERR(data->usb_vbus_gpios),
 				      "failed to get usb-vbus gpios\n");
