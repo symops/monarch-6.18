@@ -10,7 +10,7 @@ exec </dev/console >/dev/console 2>&1
 
 # Create our own mountpoints: an initramfs image built from a source tree
 # that lost its empty directories would otherwise fail every mount below.
-mkdir -p /proc /sys /tmp /newroot /run
+mkdir -p /proc /sys /tmp /run
 mount -t proc proc /proc
 mount -t sysfs sysfs /sys
 mount -t devtmpfs devtmpfs /dev
@@ -19,86 +19,14 @@ is_mounted() {
   grep -qs "[[:space:]]$1[[:space:]]" /proc/mounts
 }
 
-cleanup_newroot() {
-  for mp in /newroot/run /newroot/dev /newroot/sys /newroot/proc /newroot; do
-    if is_mounted "$mp"; then
-      umount "$mp" 2>/dev/null || true
-    fi
-  done
-}
-
-prepare_newroot_mounts() {
-  root="$1"
-
-  mkdir -p "$root/proc" "$root/sys" "$root/dev" "$root/run"
-  is_mounted "$root/proc" || mount -t proc proc "$root/proc"
-  is_mounted "$root/sys" || mount -t sysfs sysfs "$root/sys"
-  is_mounted "$root/dev" || mount -o bind /dev "$root/dev"
-
-  if [ -d /run ]; then
-    is_mounted "$root/run" || mount -o bind /run "$root/run"
-  fi
-}
-
-find_debian_init() {
-  root="$1"
-
-  for init in /sbin/init /usr/sbin/init /lib/systemd/systemd /usr/lib/systemd/systemd; do
-    if [ -x "$root$init" ]; then
-      echo "$init"
-      return 0
-    fi
-  done
-
-  return 1
-}
-
-find_root_init() {
-  root="$1"
-
-  for init in /sbin/init /init /usr/sbin/init /lib/systemd/systemd /usr/lib/systemd/systemd; do
-    if [ -x "$root$init" ]; then
-      echo "$init"
-      return 0
-    fi
-  done
-
-  return 1
-}
-
-apply_rootfs_fixups() {
-  root="$1"
-
-  # The Debian image ships serial-getty@ttyS0 masked (symlink to /dev/null,
-  # from the vendor-kernel era). On the serial-console-only 6.18 port that
-  # leaves no way to log in - drop the mask so systemd-getty-generator can
-  # spawn the serial login prompt.
-  mask="$root/etc/systemd/system/serial-getty@ttyS0.service"
-  if [ -L "$mask" ] && [ "$(/bin/busybox readlink "$mask")" = "/dev/null" ]; then
-    /bin/busybox rm -f "$mask" &&
-      echo "[initramfs] fixup: unmasked serial-getty@ttyS0"
-  fi
-}
-
-handoff_to_debian_rootfs() {
-  root="$1"
-  init="$2"
-
-  prepare_newroot_mounts "$root" || return 1
-  apply_rootfs_fixups "$root"
-
-  echo "[initramfs] exec switch_root $root $init"
-  exec /bin/busybox switch_root -c /dev/console "$root" "$init"
-}
-
 # ---------------------------------------------------------------- netrescue
-# A serial cable is not always available. When the handoff to the real root
-# filesystem fails - or when the user asks for it by dropping a "netrescue"
-# marker file on the FAT32 CONFIG partition - bring up the network and offer
-# a telnet root shell so the box can be repaired remotely.
+# A serial cable is not always available. When the user asks for it by
+# dropping a "netrescue" marker file on the FAT32 CONFIG partition, bring
+# up the network and offer a telnet root shell so the box can be repaired
+# remotely.
 #
 # NOTE: the rescue shell is unauthenticated. It is one-shot (the marker is
-# consumed on use) and only reachable while the box sits in the initramfs.
+# consumed on use).
 CFG_DEV=/dev/sda18
 CFG_MNT=/cfg
 
@@ -143,9 +71,9 @@ start_netrescue() {
     addr=192.168.1.222
   fi
 
-  # Assemble the RAID members so the rescue user can mount and repair the
-  # real root filesystem (this is the whole point of the rescue). Harmless
-  # if they are already up.
+  # Assemble the RAID members so the rescue user can mount and work with
+  # the data disks (this is the whole point of the rescue). Harmless if
+  # they are already up.
   if [ -x /sbin/mdadm ]; then
     /sbin/mdadm --assemble --scan --auto=yes >/dev/null 2>&1 || true
   fi
@@ -162,113 +90,10 @@ start_netrescue() {
   echo "[initramfs]   ftp    $addr        <- upload/download files"
   [ -n "$addr6" ] && echo "[initramfs]   telnet $addr6   <- same shell over IPv6"
   echo "[initramfs]"
-  echo "[initramfs] to repair the system root:  mount /dev/md1 /mnt"
   echo "[initramfs] disks:"
   cat /proc/partitions
   [ -f /proc/mdstat ] && grep -E "^md" /proc/mdstat
   echo "[initramfs] ================================"
-}
-
-try_boot_debian_rootfs() {
-  if [ -x /sbin/mdadm ]; then
-    echo "[initramfs] mdadm found, assembling arrays"
-    /sbin/mdadm --assemble --scan --auto=yes 2>/dev/null || true
-    [ -f /proc/mdstat ] && cat /proc/mdstat
-
-    for p in /dev/md1 /dev/md/1 /dev/md127 /dev/md126 /dev/md125 /dev/md124 /dev/md*; do
-      [ -b "$p" ] || continue
-      cleanup_newroot
-      mkdir -p /newroot
-      if mount -t ext4 "$p" /newroot 2>/dev/null; then
-        debian_init="$(find_debian_init /newroot)"
-        if [ -f /newroot/etc/debian_version ] || [ -n "$debian_init" ]; then
-          echo "[initramfs] Debian rootfs detected on $p"
-          if [ -n "$debian_init" ]; then
-            handoff_to_debian_rootfs /newroot "$debian_init"
-            echo "[initramfs] switch_root handoff failed on $p"
-          else
-            echo "[initramfs] Debian rootfs on $p has no usable init"
-          fi
-        fi
-        cleanup_newroot
-      fi
-    done
-  else
-    echo "[initramfs] mdadm not found; skipping md assembly"
-  fi
-
-  # Prefer ext4 Debian-like partitions before vendor gzip rootfs.
-  for p in /dev/sda19 /dev/sda20 /dev/sda21 /dev/sda22 /dev/sda23 /dev/sda24 /dev/sda9; do
-    [ -b "$p" ] || continue
-    cleanup_newroot
-    mkdir -p /newroot
-    if mount -t ext4 "$p" /newroot 2>/dev/null; then
-      debian_init="$(find_debian_init /newroot)"
-      if [ -f /newroot/etc/debian_version ] || [ -n "$debian_init" ]; then
-        echo "[initramfs] Debian-like rootfs detected on $p"
-        if [ -n "$debian_init" ]; then
-          handoff_to_debian_rootfs /newroot "$debian_init"
-          echo "[initramfs] switch_root handoff failed on $p"
-        else
-          echo "[initramfs] Debian-like rootfs on $p has no usable init"
-        fi
-      fi
-      cleanup_newroot
-    fi
-  done
-  return 1
-}
-
-disable_adbd_restart_loop() {
-  root="$1"
-  patched=0
-
-  # Patch Android init rc files: make adbd oneshot+disabled to stop respawn storms.
-  for rc in $(find "$root" -type f -name '*.rc' 2>/dev/null); do
-    if ! grep -Eq '^[[:space:]]*service[[:space:]]+adbd([[:space:]]|$)' "$rc"; then
-      continue
-    fi
-
-    tmp="${rc}.tmp"
-    awk '
-      BEGIN {in_adbd=0; have_disabled=0; have_oneshot=0}
-      /^[[:space:]]*service[[:space:]]+adbd([[:space:]]|$)/ {
-        in_adbd=1
-        have_disabled=0
-        have_oneshot=0
-        print
-        next
-      }
-      in_adbd && /^[[:space:]]*service[[:space:]]+/ {
-        if (!have_disabled) print "    disabled"
-        if (!have_oneshot) print "    oneshot"
-        in_adbd=0
-        print
-        next
-      }
-      in_adbd {
-        if ($0 ~ /^[[:space:]]*disabled([[:space:]]|$)/) have_disabled=1
-        if ($0 ~ /^[[:space:]]*oneshot([[:space:]]|$)/) have_oneshot=1
-        print
-        next
-      }
-      { print }
-      END {
-        if (in_adbd) {
-          if (!have_disabled) print "    disabled"
-          if (!have_oneshot) print "    oneshot"
-        }
-      }
-    ' "$rc" > "$tmp" && mv "$tmp" "$rc"
-
-    patched=1
-  done
-
-  if [ "$patched" -eq 1 ]; then
-    echo "[initramfs] adbd policy patched (disabled + oneshot)"
-  else
-    echo "[initramfs] no adbd service stanza found in rc files"
-  fi
 }
 
 # Convenience reboot helpers for serial recovery.
@@ -338,20 +163,16 @@ echo "[initramfs] booted. kernel cmdline: $(cat /proc/cmdline)"
 
 if rescue_marker_present; then
   start_netrescue "requested via netrescue marker on the CONFIG partition"
-  echo "[initramfs] rescue shell on the serial console:"
-  /bin/sh -i
-  echo "[initramfs] rescue shell exited, keeping init alive"
-  while true; do sleep 3600; done
 fi
 echo "[initramfs] quick reboot: reboot -f  or  reboot-now"
 
 # ahci_rtd1295 only finishes probing (and SATA link-up/negotiation) after
 # phy-rtk-sata.ko is inserted above; on this board's WD5000AZLX drive that
-# whole process reliably takes several seconds. Without this wait, the
-# partition scan below runs before the disk is attached and always falls
-# through to Network Rescue Mode. host1/host2 are ahci_rtd1295's fixed SCSI
-# host numbers on this SoC, so this doesn't depend on which /dev/sd? letter
-# the kernel ends up assigning (the rescue USB stick itself claims sda).
+# whole process reliably takes several seconds. Without this wait, mdadm
+# assembly below can run before the disk is attached. host1/host2 are
+# ahci_rtd1295's fixed SCSI host numbers on this SoC, so this doesn't
+# depend on which /dev/sd? letter the kernel ends up assigning (the
+# rescue USB stick itself claims sda).
 wait_for_sata_disk() {
   echo "[initramfs] waiting for SATA disk to link up..."
   i=0
@@ -372,56 +193,19 @@ wait_for_sata_disk
 echo "[initramfs] block devices:"
 cat /proc/partitions
 
-if try_boot_debian_rootfs; then
-  echo "[initramfs] Debian init exited, fallback to shell"
+# This image is the final root filesystem (a minimal ramdisk), not a
+# staging step for booting something else from disk -- no switch_root or
+# chroot into HDD/eMMC storage. Assemble any RAID members so the data
+# disks are available to mount by hand from the shell below.
+if [ -x /sbin/mdadm ]; then
+  echo "[initramfs] mdadm found, assembling arrays"
+  /sbin/mdadm --assemble --scan --auto=yes 2>/dev/null || true
+  [ -f /proc/mdstat ] && cat /proc/mdstat
+else
+  echo "[initramfs] mdadm not found; skipping md assembly"
 fi
 
-# If vendor rootfs is stored as a gzip archive in sda9, unpack it and boot it.
-if [ -b /dev/sda9 ]; then
-  magic="$(od -An -tx1 -N3 /dev/sda9 2>/dev/null | tr -d ' \n')"
-  if [ "$magic" = "1f8b08" ]; then
-    echo "[initramfs] detected gzip image on /dev/sda9, trying cpio/tar extraction"
-    cleanup_newroot
-    mkdir -p /newroot
-
-    if (cd /newroot && zcat /dev/sda9 | cpio -idm --quiet 2>/dev/null); then
-      echo "[initramfs] cpio extraction succeeded"
-    elif (cd /newroot && zcat /dev/sda9 | tar -xpf - 2>/dev/null); then
-      echo "[initramfs] tar extraction succeeded"
-    else
-      echo "[initramfs] extraction from /dev/sda9 failed"
-    fi
-
-    disable_adbd_restart_loop /newroot
-
-    prepare_newroot_mounts /newroot
-
-    # Do not switch_root here: if vendor init exits, PID1 would panic the kernel.
-    # Use chroot handoff for debugging resilience and keep initramfs PID1 alive.
-    root_init="$(find_root_init /newroot)"
-    if [ -n "$root_init" ]; then
-      echo "[initramfs] chroot -> /newroot $root_init"
-      chroot /newroot "$root_init"
-      echo "[initramfs] $root_init returned, fallback to shell"
-    else
-      echo "[initramfs] no init binary in extracted rootfs"
-    fi
-  fi
-fi
-
-echo "[initramfs] trying common root partitions..."
-for p in /dev/sda9 /dev/sda19 /dev/sda20 /dev/sda21 /dev/sda22 /dev/sda23 /dev/sda24; do
-  mkdir -p /newroot
-  if mount -t ext4 -o ro "$p" /newroot 2>/dev/null; then
-    echo "[initramfs] mounted $p"
-    ls -la /newroot | head -40
-    umount /newroot
-  fi
-done
-
-start_netrescue "no bootable root filesystem was found"
-
-echo "[initramfs] dropping to shell"
+echo "[initramfs] shell on the serial console:"
 /bin/sh -i
 
 echo "[initramfs] shell exited, keeping init alive"
