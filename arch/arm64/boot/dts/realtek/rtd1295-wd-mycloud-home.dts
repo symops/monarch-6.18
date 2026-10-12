@@ -146,6 +146,8 @@
 		interrupt-parent = <&mux_intc>;
 		interrupts = <1 8>;
 		i2c-num = <0>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&i2c0_pins>;
 		status = "okay";
 		#address-cells = <1>;
 		#size-cells = <0>;
@@ -159,14 +161,14 @@
 				compatible = "gmt,g2227-regulator";
 				status = "okay";
 
-				dc1 { regulator-boot-on; regulator-always-on; regulator-name = "vd33"; regulator-min-microvolt = <3000000>; regulator-max-microvolt = <3300000>; regulator-initial-mode = <1>; };
-				dc2 { regulator-boot-on; regulator-always-on; regulator-name = "cpudvs"; regulator-min-microvolt = <800000>; regulator-max-microvolt = <1187500>; regulator-initial-mode = <0>; regulator-state-mem { regulator-off-in-suspend; }; };
-				dc3 { regulator-boot-on; regulator-always-on; regulator-name = "gpudvs"; regulator-min-microvolt = <800000>; regulator-max-microvolt = <1187500>; regulator-initial-mode = <0>; regulator-ramp-delay = <625>; regulator-state-mem { regulator-off-in-suspend; }; };
+				dc1 { regulator-boot-on; regulator-always-on; regulator-name = "vd33"; regulator-min-microvolt = <3300000>; regulator-max-microvolt = <3300000>; regulator-initial-mode = <1>; };
+				cpu_supp: dc2 { regulator-boot-on; regulator-always-on; regulator-name = "cpudvs"; regulator-min-microvolt = <825000>; regulator-max-microvolt = <1100000>; regulator-ramp-delay = <300>; regulator-coupled-with = <&l2_supp>; regulator-coupled-max-spread = <100000>; regulator-initial-mode = <0>; regulator-state-coldboot { regulator-off-in-suspend; }; };
+				dc3 { regulator-boot-on; regulator-always-on; regulator-name = "gpudvs"; regulator-min-microvolt = <1000000>; regulator-max-microvolt = <1000000>; regulator-initial-mode = <0>; regulator-ramp-delay = <625>; regulator-state-coldboot { regulator-off-in-suspend; }; };
 				dc4 { regulator-boot-on; regulator-always-on; regulator-name = "ddr"; regulator-min-microvolt = <1500000>; regulator-max-microvolt = <1500000>; regulator-initial-mode = <0>; regulator-state-coldboot { regulator-off-in-suspend; }; };
-				dc5 { regulator-boot-on; regulator-always-on; regulator-name = "iso"; regulator-min-microvolt = <800000>; regulator-max-microvolt = <1187500>; regulator-initial-mode = <0>; };
-				dc6 { regulator-boot-on; regulator-always-on; regulator-name = "top"; regulator-min-microvolt = <800000>; regulator-max-microvolt = <1187500>; regulator-initial-mode = <0>; regulator-state-mem { regulator-off-in-suspend; }; };
-				ldo2 { regulator-boot-on; regulator-always-on; regulator-name = "ldo2"; regulator-min-microvolt = <1500000>; regulator-max-microvolt = <1900000>; regulator-initial-mode = <0>; regulator-state-mem { regulator-off-in-suspend; }; };
-				ldo3 { regulator-boot-on; regulator-always-on; regulator-name = "ldo3"; regulator-min-microvolt = <800000>; regulator-max-microvolt = <1200000>; regulator-initial-mode = <0>; regulator-state-mem { regulator-off-in-suspend; }; };
+				dc5 { regulator-boot-on; regulator-always-on; regulator-name = "iso"; regulator-min-microvolt = <1000000>; regulator-max-microvolt = <1000000>; regulator-initial-mode = <0>; };
+				dc6 { regulator-boot-on; regulator-always-on; regulator-name = "top"; regulator-min-microvolt = <1000000>; regulator-max-microvolt = <1000000>; regulator-initial-mode = <0>; regulator-state-coldboot { regulator-off-in-suspend; }; };
+				ldo2 { regulator-boot-on; regulator-always-on; regulator-name = "ldo2"; regulator-min-microvolt = <1800000>; regulator-max-microvolt = <1800000>; regulator-initial-mode = <0>; regulator-state-coldboot { regulator-off-in-suspend; }; };
+				l2_supp: ldo3 { regulator-boot-on; regulator-always-on; regulator-name = "ldo3"; regulator-min-microvolt = <900000>; regulator-max-microvolt = <1000000>; regulator-ramp-delay = <300>; regulator-coupled-with = <&cpu_supp>; regulator-coupled-max-spread = <100000>; regulator-initial-mode = <0>; regulator-state-coldboot { regulator-off-in-suspend; }; };
 			};
 		};
 	};
@@ -258,6 +260,16 @@
 		status = "okay";
 	};
 
+	rtk_misc_gpio: gpio@1b100 {
+		compatible = "realtek,rtd1295-misc-gpio";
+		reg = <0x1b100 0x100>, <0x1b000 0x100>;
+		interrupt-parent = <&mux_intc>;
+		interrupts = <0 19>, <0 20>;
+		gpio-controller;
+		#gpio-cells = <2>;
+		status = "okay";
+	};
+
 	/*
 	 * Cosmetic power-off -- see drivers/power/reset/wdmc-poweroff.c for
 	 * the full story on why this isn't a real power cut. reg[0] is the
@@ -272,21 +284,21 @@
 	 * rtk_iso_gpio's gpio_base=101/35 lines, both confirmed in the
 	 * vendor's rtd-1295.dtsi, put those at misc-gpio bit 19 directly and
 	 * rtk_iso_gpio local line 1 respectively). Unlike Duo (both ports on
-	 * rtk_iso_gpio), Monarch's stock split lands one port on misc-gpio,
-	 * which has no mainline gpiolib controller in this port -- reg[1]/
-	 * reg[2] (DATO/DIR) plus wd,misc-gpio-vbus-bit are the raw-MMIO path
-	 * for that one bit; rtk_iso_gpio line 1 is a normal gpiod consumer,
-	 * same as Duo's lines. Confirmed on real Monarch hardware (see
-	 * README.md's poweroff section) -- like Duo's equivalent, needed
-	 * a several-second hold, not a brief pulse, to show any effect at
-	 * all (see wdmc-poweroff.c's header comment).
+	 * rtk_iso_gpio), Monarch's stock split lands one port on misc-gpio;
+	 * both lines are wd,usb-vbus-gpios. Confirmed on real Monarch
+	 * hardware (see README.md's poweroff section) -- like Duo's
+	 * equivalent, needed a several-second hold, not a brief pulse, to
+	 * show any effect at all (see wdmc-poweroff.c's header comment).
 	 */
 	poweroff: poweroff@70d0 {
 		compatible = "wd,mycloud-home-poweroff";
-		reg = <0x70d0 0x4>, <0x1b110 0x4>, <0x1b100 0x4>;
+		reg = <0x70d0 0x4>,
+		      <0x7680 0x4>,			/* watchdog control */
+		      <0x7800 0x20>;			/* UART0 */
 		wd,pwm-off-channels = <3>; /* SYS LED only -- no fan on Monarch */
-		wd,misc-gpio-vbus-bit = <19>;
-		wd,usb-vbus-gpios = <&rtk_iso_gpio 1 GPIO_ACTIVE_HIGH>;
+		wd,usb-vbus-gpios = <&rtk_iso_gpio 1 GPIO_ACTIVE_HIGH>,
+				    <&rtk_misc_gpio 19 GPIO_ACTIVE_HIGH>;
+		memory-region = <&rpc_comm>;		/* IPC with the audio CPU */
 		status = "okay";
 	};
 
@@ -343,6 +355,7 @@
 	sata@3f000 {
 		compatible = "realtek,rtd1295-ahci";
 		reg = <0x3f000 0xf00>;
+		power-gpios = <&rtk_misc_gpio 18 GPIO_ACTIVE_HIGH>;	/* drive bay supply */
 		interrupts = <GIC_SPI 28 IRQ_TYPE_LEVEL_HIGH>;
 		phys = <&sata_phy 0>;
 		phy-names = "sata-phy";
@@ -529,6 +542,11 @@
 	};
 };
 
+/* The power-off driver writes the audio CPU's IPC block, which it reads uncached */
+&rpc_comm {
+	no-map;
+};
+
 &uart0 {
 	/* v18: IRQ via ISO mux (index 1, status bit 2). interrupts-st-mask
 	 * matches the vendor DT; mainline 8250 ignores it (the mux driver
@@ -660,6 +678,19 @@
 };
 
 &iso {
+	/* No RTD1295 pin controller in 6.18; U-Boot leaves I2C0's pads as GPIOs */
+	pinmux@310 {
+		compatible = "pinctrl-single";
+		reg = <0x310 0x4>;
+		#pinctrl-cells = <1>;
+		pinctrl-single,register-width = <32>;
+		pinctrl-single,function-mask = <0x03c00000>;
+
+		i2c0_pins: i2c0-pins {
+			pinctrl-single,pins = <0x0 0x01400000>;	/* SCL, SDA: I2C */
+		};
+	};
+
 	pwm: pwm@d0 {
 		compatible = "realtek,rtd129x-pwm";
 		reg = <0xd0 0xc>;
@@ -755,33 +786,36 @@
 };
 
 /*
- * cpufreq: divider-only scaling below the boot operating point.  The
- * boot loader leaves PLL_SCPU at 1201.5 MHz with the post-divider at
- * /2, so this board has always run at 600.75 MHz; the OPPs are that
- * proven point and its half.  No opp-microvolt on purpose: the cpudvs
- * rail is never touched, both OPPs are safe at whatever voltage the
- * board booted with.
+ * cpufreq: WD's operating points. The boot loader's PLL setting reads
+ * back as 1200 MHz, /2, so the boot state is the 600 MHz OPP. The OPPs
+ * set the cpudvs rail (DC2); the L2 rail (LDO3) follows it through the
+ * regulators' coupling, which needs the OPPs' voltage range (target,
+ * min, max) to step both rails.
  */
 &cpu0 {
 	clocks = <&scpu_clk>;
+	cpu-supply = <&cpu_supp>;
 	#cooling-cells = <2>;
 	operating-points-v2 = <&cpu_opps>;
 };
 
 &cpu1 {
 	clocks = <&scpu_clk>;
+	cpu-supply = <&cpu_supp>;
 	#cooling-cells = <2>;
 	operating-points-v2 = <&cpu_opps>;
 };
 
 &cpu2 {
 	clocks = <&scpu_clk>;
+	cpu-supply = <&cpu_supp>;
 	#cooling-cells = <2>;
 	operating-points-v2 = <&cpu_opps>;
 };
 
 &cpu3 {
 	clocks = <&scpu_clk>;
+	cpu-supply = <&cpu_supp>;
 	#cooling-cells = <2>;
 	operating-points-v2 = <&cpu_opps>;
 };
@@ -791,19 +825,34 @@
 		compatible = "operating-points-v2";
 		opp-shared;
 
-		opp-300375000 {
-			opp-hz = /bits/ 64 <300375000>;
-			clock-latency-ns = <150000>;
-		};
-
-		opp-600750000 {
-			opp-hz = /bits/ 64 <600750000>;
-			clock-latency-ns = <150000>;
+		opp-600000000 {
+			opp-hz = /bits/ 64 <600000000>;
+			opp-microvolt = <825000 825000 1100000>;
+			clock-latency-ns = <300000>;
 			opp-suspend;
 		};
 
-		opp-1100000000 {
-			opp-hz = /bits/ 64 <1100000000>;
+		opp-800000000 {
+			opp-hz = /bits/ 64 <800000000>;
+			opp-microvolt = <875000 875000 1100000>;
+			clock-latency-ns = <300000>;
+		};
+
+		opp-1000000000 {
+			opp-hz = /bits/ 64 <1000000000>;
+			opp-microvolt = <925000 925000 1100000>;
+			clock-latency-ns = <300000>;
+		};
+
+		opp-1200000000 {
+			opp-hz = /bits/ 64 <1200000000>;
+			opp-microvolt = <1012500 1012500 1100000>;
+			clock-latency-ns = <300000>;
+		};
+
+		opp-1400000000 {
+			opp-hz = /bits/ 64 <1400000000>;
+			opp-microvolt = <1100000 1100000 1100000>;
 			clock-latency-ns = <300000>;
 		};
 	};
