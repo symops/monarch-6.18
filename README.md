@@ -312,33 +312,6 @@ so that change lives only in built artifacts, not in this history.
 Rebased onto v6.18.55 the same way — clean merge, no conflicts.
 Rebuilt and repackaged with `LOCALVERSION=` as usual.
 
-### CPU0-hang workaround bumped: 100 → 1000 no-op instructions
-
-After porting PR #9's G2227 PMIC/DVFS infrastructure to Duo (6.18.56
-base, see symops/pelican-6.18's `docs/pr-6-9-duo-adaptation-plan.md`),
-real Duo hardware hit a NEW RCU stall on CPU0 during boot, with a
-different stack from the documented hang above: `dt_cpufreq_probe` →
-`cpufreq_online` → `of_cpufreq_cooling_register` → `device_register` →
-`kobject_uevent_env`, registering the cpufreq-cooling thermal device
-that PR #9's cpufreq driver brings up for the first time — CPU0 was
-actively running `kworker` code, not stuck in `do_idle()` like every
-other occurrence of this class of hang. Monarch itself ran the
-identical ported code for many hours of real OPP/schedutil/stress
-testing (see symops/pelican-6.18's `docs/opp-verify/`) with zero such
-stalls — this looks Duo-specific, root cause not established.
-
-Per this workaround's precedent (see "v6.18.51 → v6.18.52" above —
-unrelated kernel image layout/size shifts change whether this whole
-class of hardware race reproduces, mechanism never understood), bumped
-`asm volatile (".rept 100\n\tnop\n\t.endr");` to `.rept 1000` right
-before `do_idle()`'s idle loop (`kernel/sched/idle.c`), same file as
-before. Explicitly a shot in the dark for this specific new stack
-trace, not a reasoned fix — applied identically here to keep both
-ports in lockstep on this value, even though Monarch shows no symptom
-of the new stall. Negligible cost: ~1000 cycles once per `do_idle()`
-entry, idle path only. Rebuilt clean (`Image`/`modules`/`dtbs`,
-`LOCALVERSION=`); Duo real-hardware boot retest pending.
-
 ## Building and booting
 
 For a full step-by-step walkthrough — toolchain setup on a clean Debian 13

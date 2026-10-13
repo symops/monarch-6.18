@@ -301,27 +301,12 @@ static void do_idle(void)
 	 * (Monarch) -- see pelican-6.18's README.md. Empirically, an
 	 * unrelated shift in kernel image layout/size around the do_idle()
 	 * idle-loop entry point changes how often the hang-triggering
-	 * condition occurs; the exact mechanism isn't understood, but 1000
-	 * no-op instructions here (negligible cost: ~1000 cycles, once per
+	 * condition occurs; the exact mechanism isn't understood, but 100
+	 * no-op instructions here (negligible cost: ~100 cycles, once per
 	 * do_idle() entry, only on the CPU idle path) reproducibly avoided
 	 * the hang in testing where the fix-free build reliably hung.
-	 *
-	 * Bumped from 100 to 1000 (still empirical, not a reasoned fix) after
-	 * a NEW RCU stall symptom was observed on real Duo hardware (6.18.56
-	 * + PR#7 + PR#9 DVFS infra): CPU0 stuck in
-	 * dt_cpufreq_probe -> cpufreq_online -> of_cpufreq_cooling_register
-	 * -> device_register -> kobject_uevent_env while registering the new
-	 * cpufreq-cooling thermal device PR#9's driver brings up for the
-	 * first time, actively running kworker code (not idle in do_idle()
-	 * like the original documented hang). Monarch ran the identical
-	 * ported code for many hours of real OPP/schedutil/stress testing
-	 * with zero such stalls, so this looks Duo-specific rather than a
-	 * generic bug in the ported cpufreq/thermal code -- root cause
-	 * unknown. Applied here anyway, in both ports, per this workaround's
-	 * established precedent of layout perturbation shifting whether this
-	 * class of hardware race reproduces.
 	 */
-	asm volatile (".rept 1000\n\tnop\n\t.endr");
+	asm volatile (".rept 100\n\tnop\n\t.endr");
 	while (!need_resched()) {
 
 		/*
