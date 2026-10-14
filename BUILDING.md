@@ -156,7 +156,7 @@ it to the unit and `chmod +x` it. To build it yourself see that repository's
 or a wrong file silently corrupts or bricks that slot — there is no confirmation prompt.
 Always prove a build boots via the section 10 USB rescue path first, and double-check
 the target device against the actual unit before running any of this. Take a backup of
-the table first (`--backup FILE`) and rehearse the exact command with `--dry-run`, which
+the table first (`--backup=FILE`) and rehearse the exact command with `--dry-run`, which
 prints what would be written and writes nothing.
 
 ### Monarch
@@ -198,7 +198,7 @@ Useful before and after (add `--device /dev/sdX` on Monarch):
 
 ```sh
 verona-tool --platform pelican --list                        # print the firmware table
-verona-tool --platform pelican --backup duo-table.img \
+verona-tool --platform pelican --backup=duo-table.img \
     --read 5:kernel-backup.img                               # back up the table and one slot first
 verona-tool --platform pelican --dry-run --write --kernel=/mnt/emmc.uImage   # rehearse
 verona-tool --platform pelican --restore duo-table.img       # put a saved table back
