@@ -368,12 +368,15 @@ static int wdmc_poweroff_probe(struct platform_device *pdev)
 	}
 
 	/*
-	 * GPIOD_ASIS: don't touch the line's current state at probe time
-	 * (the board is already up and these ports are already powered);
-	 * the shutdown handler is the only place this ever gets driven.
+	 * U-Boot powers the USB ports only on its USB boot paths, not when it
+	 * boots from SATA, so after a normal boot VBUS can still be off (on
+	 * Monarch, MISC GPIO 19): raise it here, so that a rootfs or an
+	 * initramfs does not have to. On a board whose ports are already
+	 * powered by now (Duo) the lines are already high and this changes
+	 * nothing. The shutdown handler drives them low again.
 	 */
 	data->usb_vbus_gpios = devm_gpiod_get_array_optional(dev, "wd,usb-vbus",
-							       GPIOD_ASIS);
+							       GPIOD_OUT_HIGH);
 	if (IS_ERR(data->usb_vbus_gpios))
 		return dev_err_probe(dev, PTR_ERR(data->usb_vbus_gpios),
 				      "failed to get usb-vbus gpios\n");
