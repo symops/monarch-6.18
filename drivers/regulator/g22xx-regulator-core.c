@@ -1,3 +1,4 @@
+#include <linux/delay.h>
 #include <linux/module.h>
 // SPDX-License-Identifier: GPL-2.0-only
 /*
@@ -214,6 +215,34 @@ const struct regulator_ops g22xx_regulator_fixed_uV_ops = {
 };
 EXPORT_SYMBOL_GPL(g22xx_regulator_fixed_uV_ops);
 
+/*
+ * The sleep-mode fields are what actually switch a rail off when the audio
+ * CPU puts the PMIC to sleep at power-off. An I2C transfer that fails (or is
+ * not applied) leaves that rail powered, and the board then keeps drawing
+ * power after "shutdown -P" -- seen intermittently on real hardware -- so
+ * write, read back, retry, and say so if it never sticks.
+ */
+static int g22xx_sleep_field_write(struct device *dev, struct regmap_field *field,
+				   unsigned int val, const char *what)
+{
+	unsigned int rb = 0;
+	int ret = -EIO, i;
+
+	for (i = 0; i < 3; i++) {
+		ret = regmap_field_write(field, val);
+		if (!ret)
+			ret = regmap_field_read(field, &rb);
+		if (!ret && rb == val)
+			return 0;
+		if (!ret)
+			ret = -EIO;
+		msleep(5);
+	}
+	dev_warn(dev, "cannot set %s to %u after 3 tries (last error %d, read back %u)\n",
+		 what, val, ret, rb);
+	return ret;
+}
+
 int g22xx_regulator_set_state(struct regulator_dev *rdev, int is_coldboot)
 {
 	struct g22xx_regulator_data *data = rdev_get_drvdata(rdev);
@@ -239,15 +268,15 @@ int g22xx_regulator_set_state(struct regulator_dev *rdev, int is_coldboot)
 
 		dev_dbg(dev, "set sleep_mode to volt-%d\n",
 			rstate->uV);
-		regmap_field_write(data->smode, 0x2);
-		regmap_field_write(data->svsel, vsel);
+		if (g22xx_sleep_field_write(dev, data->smode, 0x2, "sleep mode") ||
+		    g22xx_sleep_field_write(dev, data->svsel, vsel, "sleep voltage select"))
+			return -EIO;
 		return 0;
 	}
 
 	if (rstate->enabled == DISABLE_IN_SUSPEND) {
 		dev_dbg(dev, "set sleep_mode to disabled\n");
-		regmap_field_write(data->smode, 0x3);
-		return 0;
+		return g22xx_sleep_field_write(dev, data->smode, 0x3, "sleep mode (off)");
 	}
 
 	return -EINVAL;
