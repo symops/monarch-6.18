@@ -34,9 +34,24 @@ make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
 
 `olddefconfig` resolves any new Kconfig symbols introduced since that release against their defaults — always run it after fetching an older `.config`.
 
-**Always pass `ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-` to every `make`, including `olddefconfig`.** A `make` run without `ARCH` configures against the host (x86) Kconfig and silently strips the board options from `.config` (`ARCH_REALTEK`, `IRQ_RTD129X_MUX`, `CMDLINE`, ...): no UART console, `dw-apb-uart: IRQ index 0 not found`, `/init` exits at once. If a boot looks like that, check `grep -E 'ARCH_REALTEK|IRQ_RTD129X_MUX|^CONFIG_CMDLINE=' .config` and re-fetch `default.config`.
+### Duo: required `.config` settings
 
-**PMIC drivers as modules.** `PINCTRL_SINGLE`, `MFD_G2227_I2C`, `REGULATOR_G2227` and `I2C_RTK` are `=m` in the build recipe, as on the Pelican (Duo) board, where built in they bring back the CPU0 hang (see its `BUILDING.md`: the idle-loop nop workaround is layout-sensitive). The PMIC, DVFS and the real power-off then only work once those modules are loaded (udev does it from the DT aliases). *Monarch with the modules is built but still pending hardware re-verification; the previous all-built-in config booted and powered off correctly.*
+These matter for a Duo (Pelican) build; the release `default.config` plus the following is the verified recipe:
+
+| Symbol | Value | Why |
+|---|---|---|
+| `CONFIG_PINCTRL_SINGLE` | `m` | I2C0 pinmux for the PMIC (DTS `pinmux@310`) |
+| `CONFIG_MFD_G2227_I2C` | `m` | G2227 PMIC core |
+| `CONFIG_REGULATOR_G2227` | `m` | PMIC regulators: DVFS (`cpu-supply`) and the power-off rail shutdown |
+| `CONFIG_I2C_RTK` | `m` | I2C0 controller |
+| `CONFIG_MQ_IOSCHED_DEADLINE` | `y` | otherwise block devices come up with scheduler `none` |
+| `CONFIG_RT_GROUP_SCHED` | not set | systemd wants it off |
+
+**The three PMIC drivers must be modules, not built in.** Built in (about +16 KB in `vmlinux`) they bring back the CPU0 hang (`port 0 is not capable of FBS` followed by an RCU stall with CPU0 stuck in `do_idle()`), because the idle-loop nop workaround (`.rept 100` in `kernel/sched/idle.c`) is layout-sensitive and only happens to work for the module layout. Bisected on real hardware: PR #7 alone boots, the four drivers built in hang, PMIC/OPP DTS with the drivers as modules boots. Changing the nop count (100, 1000, 10000) did not help. Do not flip these to `=y` without re-testing a full boot.
+
+Consequences of the modules: the PMIC, DVFS (`cpufreq-dt` stays in deferred probe until `g2227-regulator` loads, about 37 s into boot with udev) and the real power-off (the g2227 driver's coldboot sleep states cut the rails at `shutdown`) only work once the modules are loaded. The rescue initrd does not load them, so `cpufreq-dt: deferred probe pending` there is expected.
+
+**Always pass `ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-` to every `make`, including `olddefconfig`.** A `make` run without `ARCH` configures against the host (x86) Kconfig and silently strips the board options from `.config` (`ARCH_REALTEK`, `IRQ_RTD129X_MUX`, `CMDLINE`, ...): no UART console, `dw-apb-uart: IRQ index 0 not found`, `/init` exits at once. If a boot looks like that, check `grep -E 'ARCH_REALTEK|IRQ_RTD129X_MUX|^CONFIG_CMDLINE=' .config` and re-fetch `default.config`.
 
 ## 4. Build the kernel, modules, and device trees
 
@@ -73,6 +88,12 @@ python3 tools/monarch/patch-header.py arch/arm64/boot/Image
 This board's U-Boot (2015.07, 2016 vintage) copies the loaded Image to the physical address given by the image header's own `text_offset` field. A normal relocatable arm64 `Image` has `text_offset=0` — i.e. "copy on top of itself at address 0" — which is silent, total, undebuggable boot failure (no console output at all). The script rewrites `code0`, `text_offset` (to `0x200000`), and `pe_offset` in the Image header in place. **Run this on every rebuilt Image, before packaging it.**
 
 ## 7. Package the boot image
+
+The packaged files go into `usb-payload/` (steps 7-9), which is not in the repository: create it first.
+
+```sh
+mkdir -p usb-payload
+```
 
 **Duo:**
 ```sh
@@ -113,6 +134,8 @@ cd initramfs/bin && for a in $(qemu-aarch64 ./busybox --list); do [ -e "$a" ] ||
 
 (use `./busybox --list` directly on an aarch64 host).
 
+In the `open(...)` line replace `<emmc|sata>` with `emmc` for a Duo or `sata` for a Monarch (the file name must be exactly `rescue.root.emmc.cpio.gz_pad.img` or `rescue.root.sata.cpio.gz_pad.img`).
+
 The bootloader's rescue path reads this file as a **fixed 4,194,304-byte block**, regardless of real payload size — the zero-padding to that exact length is mandatory, not cosmetic.
 
 ## 9. Install and package the modules
@@ -120,11 +143,12 @@ The bootloader's rescue path reads this file as a **fixed 4,194,304-byte block**
 ```sh
 rm -rf /tmp/modinstall && mkdir -p /tmp/modinstall
 make -j"$(nproc)" LOCALVERSION= modules_install INSTALL_MOD_PATH=/tmp/modinstall
-( cd /tmp/modinstall/lib/modules && tar -cJf usb-payload/modules.tar.xz . )
+KDIR="$PWD"
+( cd /tmp/modinstall/lib/modules && tar -cJf "$KDIR/usb-payload/modules.tar.xz" . )
 cp .config usb-payload/.config
 ```
 
-Archiving from *inside* `lib/modules/` (not with `lib/modules/` as a prefix) matters: it makes the tar root `./<kernelrelease>/...`, so `tar -C /lib/modules -xf modules.tar.xz` on the target lands the version directory at the correct path directly.
+`KDIR` keeps the kernel tree's path, because the `tar` runs from another directory and a relative `usb-payload/...` destination would not exist there. Archiving from *inside* `lib/modules/` (not with `lib/modules/` as a prefix) matters: it makes the tar root `./<kernelrelease>/...`, so `tar -C /lib/modules -xf modules.tar.xz` on the target lands the version directory at the correct path directly.
 
 ## 10. Deploy for testing
 

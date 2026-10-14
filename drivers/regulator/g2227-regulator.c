@@ -166,8 +166,14 @@ static void g2227_regulator_shutdown(struct platform_device *pdev)
 	struct g22xx_regulator_data *pos;
 
 	dev_info(dev, "Enter %s\n", __func__);
-	list_for_each_entry(pos, &grdev->list, list)
-		g22xx_regulator_set_state(pos->rdev, 1);
+	list_for_each_entry(pos, &grdev->list, list) {
+		/* -EINVAL just means "no sleep mode to set" (a rail that stays on) */
+		int ret = g22xx_regulator_set_state(pos->rdev, 1);
+
+		if (ret && ret != -EINVAL)
+			dev_warn(dev, "%s: sleep state not applied: %d\n",
+				 rdev_get_name(pos->rdev), ret);
+	}
 	dev_info(dev, "Exit %s\n", __func__);
 }
 

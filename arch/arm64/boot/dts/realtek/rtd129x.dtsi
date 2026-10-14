@@ -191,4 +191,43 @@
 		resets = <&reset2 RTD1295_RSTN_UR2>;
 		status = "disabled";
 	};
+
+	/*
+	 * Real-time clock counter (drivers/rtc/rtc-rtd119x.c). Lives under
+	 * &misc (0x9801bXXX), not &iso -- confirmed against the vendor
+	 * 4.9.330 pelican tree's rtd-129x.dtsi, which nests its own
+	 * equivalent rtc@600 inside &misc too (and its CRT clock gate is
+	 * literally named RTD1295_CRT_CLK_EN_MISC_RTC, which in hindsight
+	 * was already saying as much). An earlier version of this node was
+	 * placed under &iso by mistake, at 0x98007600 -- a real,
+	 * unrelated register that happened to look plausible: reads
+	 * returned a fixed pattern, or on later boots a counter-like field
+	 * that incremented roughly once a second in what this driver reads
+	 * as "hour", both consistent with reading some other ISO peripheral
+	 * entirely rather than the real RTC. Real hardware testing (Duo,
+	 * confirmed board battery) showed the wrong address never persisted
+	 * time across a power cycle even though the vendor's own driver, on
+	 * the same hardware, does -- the vendor 4.9.330 boot log for this
+	 * exact unit shows this block registering at 9801b600, matching
+	 * &misc's base, not &iso's.
+	 *
+	 * Whether this is actually battery-backed depends on the board --
+	 * the driver self-detects via RTCACR.RTCPWR (set if the domain
+	 * stayed powered since the last time this driver ran, cleared on a
+	 * true cold start) and only resets/zeroes the counter in the
+	 * cold-start case, so it's safe to enable even on boards without a
+	 * battery: it just behaves as a counter that resets to the base
+	 * year every power cycle, same as leaving it unbound. No dedicated
+	 * CRT clock-gate driver exists for this block yet (same situation
+	 * as wdt/uart0/uart1/uart2 above), so it uses the free-running
+	 * reference oscillator like they do -- clk_prepare_enable() on a
+	 * fixed-clock is a no-op, and this specific clock gate (CRT+0x10
+	 * bit 10) was confirmed already enabled by the bootloader anyway.
+	 */
+	hwrtc: rtc@600 {
+		compatible = "realtek,rtd1295-rtc";
+		reg = <0x600 0x34>;
+		clocks = <&osc27M>;
+		status = "disabled";
+	};
 };
