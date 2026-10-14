@@ -135,72 +135,74 @@ Put `emmc.uImage`/`sata.uImage`, `rescue.emmc.dtb`/`rescue.sata.dtb`, and `rescu
 Section 10's USB rescue-boot path never touches the unit's own storage — it's the
 safe way to test a build. To make a build be the one the bootloader loads on a normal,
 no-USB-stick boot, the kernel/dtb/rootfs images have to be written to their actual
-partitions on the unit's internal storage (eMMC or SATA), **and** the bootloader's
+slots on the unit's internal storage (eMMC or SATA), **and** the bootloader's
 firmware table — a small on-disk structure holding, per slot, a type, size, load
 address and **checksum** — has to be updated to match. The bootloader checksums
 each slot against this table before loading it; a plain `dd` of a new kernel onto
 its partition without also updating the table gets rejected (or the old image
-silently keeps booting). Two different vendor command-line tools do this update,
-one per board family — both are tiny, closed-source, prebuilt binaries (not
-built from anything in this tree), kept at `tools/monarch/fwtablectl` (Monarch)
-and `tools/monarch/fwtutil` (Duo) for convenience.
+silently keeps booting).
 
-**This writes directly to raw partitions / the raw eMMC device on the unit's own
-storage.** A wrong device node, wrong partition number, or wrong firmware-type
-name silently corrupts or bricks that slot — there is no confirmation prompt.
-Always prove a build boots via the section 10 USB rescue path first, and
-double-check the target device/partition numbers against the actual unit before
-running any of this.
+Both boards use the same table format, and one tool handles both:
+**[verona-tool](https://github.com/symops/verona-tool)**. It writes a slot's data,
+recalculates the checksum, rewrites the table and reads everything back to verify it,
+replacing the two vendor tools (`fwtablectl` for Monarch, `fwtutil` for Duo) that used
+to be kept in this tree. Download the `verona-tool` binary (linux/arm64, dynamically
+linked against glibc only, so it runs in the rescue environment and on a full Debian)
+from the [latest release](https://github.com/symops/verona-tool/releases/latest), copy
+it to the unit and `chmod +x` it. To build it yourself see that repository's
+`BUILDING.md`; its `README.md` has the full command-line reference.
 
-### Monarch (`fwtablectl`)
+**This writes directly to the unit's own storage.** A wrong `--device`, a wrong platform
+or a wrong file silently corrupts or bricks that slot — there is no confirmation prompt.
+Always prove a build boots via the section 10 USB rescue path first, and double-check
+the target device against the actual unit before running any of this. Take a backup of
+the table first (`--backup FILE`) and rehearse the exact command with `--dry-run`, which
+prints what would be written and writes nothing.
 
-Monarch keeps the firmware table on its own partition (`/dev/sdb1` below),
-separate from the raw data partitions each slot's image lives on. Updating a
-slot is therefore two steps: `dd` the new image onto every partition that slot
-occupies, then tell `fwtablectl` (operating on the table partition) to recompute
-and store that slot's new size/checksum from the same file:
+### Monarch
 
-```sh
-dd if=/root/sata.uImage of=/dev/sdb2
-dd if=/root/sata.uImage of=/dev/sdb8
-dd if=/root/rescue.sata.dtb of=/dev/sdb5
-dd if=/root/rescue.sata.dtb of=/dev/sdb6
-dd if=/root/rescue.root.sata.cpio.gz_pad.img of=/dev/sdb3
-dd if=/root/rescue.root.sata.cpio.gz_pad.img of=/dev/sdb4
-
-/root/fwtablectl firmware update /dev/sdb1 Kernel /root/sata.uImage
-/root/fwtablectl firmware update /dev/sdb1 RescueKernel /root/sata.uImage
-/root/fwtablectl firmware update /dev/sdb1 KernelRootFS /root/rescue.root.sata.cpio.gz_pad.img
-/root/fwtablectl firmware update /dev/sdb1 RescueRootFS /root/rescue.root.sata.cpio.gz_pad.img
-/root/fwtablectl firmware update /dev/sdb1 KernelDeviceTree /root/rescue.sata.dtb
-/root/fwtablectl firmware update /dev/sdb1 RescueDeviceTree /root/rescue.sata.dtb
-```
-
-`sata.uImage` here is this guide's patched `Image` (packaged by section 7),
-`rescue.sata.dtb` is section 7's device tree, and
-`rescue.root.sata.cpio.gz_pad.img` is section 8's padded rescue initrd — each is
-written to *two* partitions (the normal-boot slot and the rescue-mode slot) and
-the table is updated for both corresponding firmware types.
-`fwtablectl firmware types` lists every type name the table accepts;
-`fwtablectl show /dev/sdb1` dumps the current table for inspection before/after.
-
-### Duo / Pelican (`fwtutil`)
-
-Duo keeps the table and the firmware data together on the single eMMC device
-(`/dev/mmcblk0`), addressed by numeric slot index rather than by type name, and
-`-r` writes the file into that slot *and* updates its table entry (checksum
-included) in one step — no separate `dd` needed:
+On Monarch pass the **whole disk** as `--device` (`/dev/sdX` — the unit's SATA disk, check
+with `lsblk`; it is required for this board): `verona-tool` reads the GPT, finds the
+firmware-table partition itself and updates each slot in place.
 
 ```sh
-/root/fwtutil -r 5:/root/emmc.uImage -r 12:/root/emmc.uImage \
-        -r 8:/root/rescue.root.emmc.cpio.gz_pad.img -r 9:/root/rescue.root.emmc.cpio.gz_pad.img \
-        -r 6:/root/rescue.emmc.dtb -r 7:/root/rescue.emmc.dtb
+verona-tool --platform monarch --device /dev/sdX --write --kernel=/mnt/sata.uImage --write --rootfs=/mnt/linux/rootfs1.bin --write --dtb=/mnt/rescue.sata.dtb
 ```
 
-Indices 5/12 are the normal-boot and rescue kernel slots (`emmc.uImage` from
-section 7), 8/9 the normal-boot and rescue rootfs slots
-(`rescue.root.emmc.cpio.gz_pad.img`, section 8's padded rescue initrd), and 6/7
-the normal-boot and rescue device-tree slots (`rescue.emmc.dtb` from section 7).
-`fwtutil -l` lists the firmware table, `fwtutil -p` lists partitions, `-x n:file`
-extracts a slot's current content back out to a file (useful for taking a
-backup of a slot before overwriting it).
+### Duo / Pelican
+
+On Duo the table and the firmware data live together on the single eMMC device, so
+`--device` can be left out (it defaults to `/dev/mmcblk0`):
+
+```sh
+verona-tool --platform pelican --write --kernel=/mnt/emmc.uImage --write --rootfs=/mnt/linux/rootfs2.bin --write --dtb=/mnt/rescue.emmc.dtb
+```
+
+### What the options do
+
+`sata.uImage`/`emmc.uImage` is section 7's patched, gzip'd `Image` and `rescue.sata.dtb`/
+`rescue.emmc.dtb` is section 7's device tree; the root filesystem image is `rootfs1.bin`
+(Monarch) or `rootfs2.bin` (Duo) in the layout used above. `--kernel`, `--rootfs` and
+`--dtb` are shortcuts for a *pair* of table slots (the normal-boot slot and its rescue
+copy): the same file is written into both, and only if it fits both — otherwise neither
+is touched. Each shortcut needs its own `--write` in front of it, and the file is
+attached with `=` (`--kernel=FILE`).
+
+| Shortcut | Slots (normal / rescue) |
+|---|---|
+| `--kernel` (`-k`) | `5` Kernel / `12` RescueKernel |
+| `--dtb` (`-t`) | `7` KernelDeviceTree / `6` RescueDeviceTree |
+| `--rootfs` (`-f`) | `9` KernelRootFS / `8` RescueRootFS |
+
+Useful before and after (add `--device /dev/sdX` on Monarch):
+
+```sh
+verona-tool --platform pelican --list                        # print the firmware table
+verona-tool --platform pelican --backup duo-table.img \
+    --read 5:kernel-backup.img                               # back up the table and one slot first
+verona-tool --platform pelican --dry-run --write --kernel=/mnt/emmc.uImage   # rehearse
+verona-tool --platform pelican --restore duo-table.img       # put a saved table back
+```
+
+`--read SLOT:FILE` also extracts any slot's current content, which is the way to take a
+backup of a slot before overwriting it.
