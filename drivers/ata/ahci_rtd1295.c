@@ -15,6 +15,7 @@
  * attributes) is not needed for RTD1295 bring-up.
  */
 
+#include <linux/gpio/consumer.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/io.h>
@@ -37,23 +38,6 @@
 #define RTD1295_MASK_ERR_SEL		0xf20
 #define RTD1295_MASK_ERR_SEL_VAL	0x3c300
 #define RTD1295_PORT_MAP_FIX		0xC
-
-/*
- * Drive-bay power enable GPIO (rtk_misc_gpio 18, board-specific, from the
- * vendor Monarch DTS: ahci_sata/sata-port@0 { gpios = <&rtk_misc_gpio 18 1
- * 1>; }). The vendor driver drives this high in ahci_rtk_probe() before any
- * link bring-up is attempted; without it the SATA link stays down forever
- * on a cold boot (the bay has no power, so there is nothing to negotiate
- * OOB signaling with). No mainline gpio-rtd129x driver/DT binding exists
- * yet, so this is a raw MMIO poke, same pattern as the vbus gpio19 poke in
- * the initramfs init script for USB -- except this one has to happen here,
- * in-kernel before ahci_platform_init_host(), because unlike USB hotplug,
- * this controller does not appear to generate a hotplug IRQ for a drive
- * that shows up after the initial COMRESET attempt.
- */
-#define RTD_MISC_GPIO_DIR		0x9801b100
-#define RTD_MISC_GPIO_DATO		0x9801b110
-#define RTD_SATA_POWER_GPIO_BIT	BIT(18)
 
 /*
  * CRT reset-control register bank 1 (offset 0x00 from CRT base 0x98000000,
@@ -91,32 +75,6 @@ static void ahci_rtd1295_phy_pow_reset_deassert(struct device *dev)
 	dev_info(dev, "sata phy pow reset deasserted\n");
 }
 
-static void ahci_rtd1295_drive_power_on(struct device *dev)
-{
-	void __iomem *reg;
-	u32 val;
-
-	reg = ioremap(RTD_MISC_GPIO_DIR, 4);
-	if (!reg) {
-		dev_warn(dev, "can't map misc-gpio dir register\n");
-		return;
-	}
-	val = readl(reg);
-	writel(val | RTD_SATA_POWER_GPIO_BIT, reg);
-	iounmap(reg);
-
-	reg = ioremap(RTD_MISC_GPIO_DATO, 4);
-	if (!reg) {
-		dev_warn(dev, "can't map misc-gpio dato register\n");
-		return;
-	}
-	val = readl(reg);
-	writel(val | RTD_SATA_POWER_GPIO_BIT, reg);
-	iounmap(reg);
-
-	dev_info(dev, "drive bay power gpio18 driven high\n");
-}
-
 static const struct ata_port_info ahci_rtd1295_port_info = {
 	.flags		= AHCI_FLAG_COMMON,
 	.pio_mask	= ATA_PIO4,
@@ -147,6 +105,7 @@ struct ahci_rtd1295_data {
 	struct platform_device *pdev;
 	struct ahci_host_priv *hpriv;
 	struct delayed_work init_work;
+	struct gpio_desc *power;
 };
 
 static void ahci_rtd1295_init_work(struct work_struct *work)
@@ -194,8 +153,17 @@ static int ahci_rtd1295_probe(struct platform_device *pdev)
 	struct ahci_host_priv *hpriv;
 	int rc;
 
+	data = devm_kzalloc(&pdev->dev, sizeof(*data), GFP_KERNEL);
+	if (!data)
+		return -ENOMEM;
+
+	/* Drive-bay supply: a cold drive needs it before the first COMRESET */
+	data->power = devm_gpiod_get_optional(&pdev->dev, "power", GPIOD_OUT_HIGH);
+	if (IS_ERR(data->power))
+		return dev_err_probe(&pdev->dev, PTR_ERR(data->power),
+				     "cannot get the drive power GPIO\n");
+
 	ahci_rtd1295_phy_pow_reset_deassert(&pdev->dev);
-	ahci_rtd1295_drive_power_on(&pdev->dev);
 
 	hpriv = ahci_platform_get_resources(pdev, AHCI_PLATFORM_GET_RESETS);
 	if (IS_ERR(hpriv))
@@ -209,13 +177,9 @@ static int ahci_rtd1295_probe(struct platform_device *pdev)
 	if (rc)
 		goto disable_resources;
 
-	data = devm_kzalloc(&pdev->dev, sizeof(*data), GFP_KERNEL);
-	if (!data) {
-		rc = -ENOMEM;
-		goto disable_resources;
-	}
 	data->pdev = pdev;
 	data->hpriv = hpriv;
+	hpriv->plat_data = data;
 	INIT_DELAYED_WORK(&data->init_work, ahci_rtd1295_init_work);
 	platform_set_drvdata(pdev, data);
 	schedule_delayed_work(&data->init_work,
@@ -226,6 +190,18 @@ static int ahci_rtd1295_probe(struct platform_device *pdev)
 disable_resources:
 	ahci_platform_disable_resources(hpriv);
 	return rc;
+}
+
+/* drvdata is the ata_host by now, as ahci_platform_shutdown() expects */
+static void ahci_rtd1295_shutdown(struct platform_device *pdev)
+{
+	struct ata_host *host = platform_get_drvdata(pdev);
+	struct ahci_host_priv *hpriv = host->private_data;
+	struct ahci_rtd1295_data *data = hpriv->plat_data;
+
+	ahci_platform_shutdown(pdev);
+	if (system_state == SYSTEM_POWER_OFF)
+		gpiod_set_value_cansleep(data->power, 0);
 }
 
 static SIMPLE_DEV_PM_OPS(ahci_rtd1295_pm_ops, ahci_platform_suspend,
@@ -240,7 +216,7 @@ MODULE_DEVICE_TABLE(of, ahci_rtd1295_of_match);
 static struct platform_driver ahci_rtd1295_driver = {
 	.probe = ahci_rtd1295_probe,
 	.remove = ata_platform_remove_one,
-	.shutdown = ahci_platform_shutdown,
+	.shutdown = ahci_rtd1295_shutdown,
 	.driver = {
 		.name = DRV_NAME,
 		.of_match_table = ahci_rtd1295_of_match,

@@ -1,26 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Cosmetic power-off for WD My Cloud Home (Monarch, RTD1295) and WD My
- * Cloud Home Duo (Pelican, RTD1296).
- *
- * Neither this SoC's mainline support nor the vendor 4.9.330 GPL source
- * implements a real hardware power-off for this board: the DTS used to
- * carry a "realtek,rtd129x-coolboot-poweroff" node, but that compatible
- * string matches no driver anywhere, mainline or vendor (checked both
- * trees directly -- see README.md). The vendor's own g2227-regulator.c
- * .shutdown() hook (already ported byte-for-byte,
- * drivers/regulator/g2227-regulator.c) only sequences down the PMIC's
- * own core-voltage rails as the SoC's last act before something
- * EXTERNAL is expected to cut the board's main 12V feed -- and no such
- * external trigger (a "power hold"/"pwr_en" GPIO) was found anywhere in
- * either board's vendor DTS. `halt`/`poweroff` on this hardware
- * therefore both just park the CPU with the board still fully powered:
- * fan spinning, front LED lit, USB VBUS live.
- *
- * This driver does not attempt to cut real board power -- there is
- * currently no known way to do that from software on this hardware. It
- * quiets the things under this SoC's own direct control that otherwise
- * stay conspicuously live.
+ * Power-off for WD My Cloud Home (Monarch, RTD1295) and WD My Cloud Home
+ * Duo (Pelican, RTD1296), as WD's 4.9 kernel does it: the audio CPU
+ * firmware, asked to "suspend to coolboot", puts the G2227 PMIC to sleep,
+ * and the PMIC then turns off the rails whose sleep mode the g2227
+ * regulator driver set to off at shutdown. Before that this driver turns
+ * off what the SoC drives directly and disarms the watchdog:
  *
  *  - PWM channel(s) for the SYS LED (and fan, Duo only): the OCD
  *    register (offset 0x0 within the pwm@d0 block) with 0 written to a
@@ -58,87 +43,188 @@
  *    either line (only line 20, the Reset button, is otherwise spoken
  *    for). Monarch's stock-firmware log shows a completely different
  *    split: one port on a single misc-gpio bit (19), the other two
- *    (sharing one physical port) on rtk_iso_gpio line 1. misc-gpio has
- *    no mainline gpiolib controller in this port (raw MMIO only, same
- *    style as the PWM OCD poke above and ahci_rtd1295.c's own SB2 gate)
- *    so wd,misc-gpio-vbus-bit's DIR/DATO windows are optional raw pokes,
- *    independent of and in addition to wd,usb-vbus-gpios's gpiod array.
+ *    (sharing one physical port) on rtk_iso_gpio line 1. All of them are
+ *    wd,usb-vbus-gpios: this driver holds them high while the system runs
+ *    and drives them low at power-off.
+ *
+ * The audio CPU's firmware, though, sometimes hangs on real hardware (it
+ * neither reads the RPC flag nor acknowledges the SB2 doorbell) and the
+ * board then stays powered (~1.4 W on Monarch, ~1.7 W on Duo) until the mains
+ * is cut. So the real power-off goes through the PMIC first: writing 0 to the
+ * G2227's ONOFF register over I2C removes every rail at once, 3.3 V and the
+ * ISO domain included (confirmed on a Duo: 0 W, normal start afterwards).
+ * Leaving 3.3 V/ISO on while the rest collapses is not an alternative: it left
+ * a Duo at ~4 W with the fan at full speed. The audio CPU's coolboot stays as
+ * the fallback when the PMIC is not reachable (its modules not loaded).
  *
  * Real disk spin-down is handled separately, through the SCSI layer's
  * own existing sd_shutdown() mechanism (the manage_shutdown sysfs
- * attribute, enabled via udev at boot) rather than reimplemented here.
+ * attribute, enabled via udev at boot) rather than reimplemented here;
+ * ahci_rtd1295 then turns off the disk's supply.
  */
 
 #include <linux/bitops.h>
+#include <linux/delay.h>
 #include <linux/gpio/consumer.h>
+#include <linux/i2c.h>
 #include <linux/io.h>
+#include <linux/mfd/g2227.h>
 #include <linux/module.h>
 #include <linux/of.h>
+#include <linux/of_address.h>
 #include <linux/platform_device.h>
 #include <linux/reboot.h>
 
 #define WDMC_PWM_OCD		0x0
 #define WDMC_MAX_PWM_CHANNELS	4
 
+#define WDMC_WDT_EN_MASK	0xff
+#define WDMC_WDT_DISABLED	0xa5
+
+#define WDMC_UART_MCR		0x10
+#define WDMC_UART_LSR		0x14
+#define WDMC_UART_MCR_LOOP	BIT(4)
+#define WDMC_UART_LSR_TEMT	BIT(6)
+
+/* struct rtk_ipc_shm (WD 4.9 rtk_ipc_shm.h) at 0xc4 into the RPC page, big-endian */
+#define WDMC_IPC_AUDIO_RPC_FLAG	(0xc4 + 0x0c)
+#define WDMC_IPC_SUSPEND_MASK	(0xc4 + 0x10)
+#define WDMC_IPC_SUSPEND_FLAG	(0xc4 + 0x14)
+
 struct wdmc_poweroff_data {
 	void __iomem *pwm_base;
 	struct gpio_descs *usb_vbus_gpios;
-	void __iomem *misc_gpio_dato;
-	void __iomem *misc_gpio_dir;
-	unsigned int misc_gpio_vbus_bit;
+	void __iomem *wdt_ctl;
+	void __iomem *uart;
+	void __iomem *ipc;
+	struct device_node *pmic;
+	bool prepare_ran;
 	unsigned int pwm_channels[WDMC_MAX_PWM_CHANNELS];
 	unsigned int n_pwm_channels;
 };
 
 static struct wdmc_poweroff_data *wdmc_poweroff;
 
-static void wdmc_poweroff_handler(void)
+/* What the SoC drives directly: the LED/fan PWM, USB VBUS and the watchdog */
+static void wdmc_quiesce(struct wdmc_poweroff_data *d)
 {
 	unsigned int i;
 	u32 val;
 
-	if (!wdmc_poweroff)
-		return;
+	for (i = 0; i < d->n_pwm_channels; i++) {
+		unsigned int shift = d->pwm_channels[i] * 8;
 
-	for (i = 0; i < wdmc_poweroff->n_pwm_channels; i++) {
-		unsigned int shift = wdmc_poweroff->pwm_channels[i] * 8;
-
-		val = readl(wdmc_poweroff->pwm_base + WDMC_PWM_OCD);
+		val = readl(d->pwm_base + WDMC_PWM_OCD);
 		val &= ~(0xffU << shift);
-		writel(val, wdmc_poweroff->pwm_base + WDMC_PWM_OCD);
+		writel(val, d->pwm_base + WDMC_PWM_OCD);
 	}
 
-	if (wdmc_poweroff->misc_gpio_dir && wdmc_poweroff->misc_gpio_dato) {
-		unsigned int bit = wdmc_poweroff->misc_gpio_vbus_bit;
-
-		/* Force the pad to output mode ourselves, same reasoning
-		 * as the gpiod lines below: don't depend on anything
-		 * upstream having already done it.
-		 */
-		val = readl(wdmc_poweroff->misc_gpio_dir);
-		writel(val | BIT(bit), wdmc_poweroff->misc_gpio_dir);
-
-		val = readl(wdmc_poweroff->misc_gpio_dato);
-		val &= ~BIT(bit);
-		writel(val, wdmc_poweroff->misc_gpio_dato);
-	}
-
-	if (wdmc_poweroff->usb_vbus_gpios) {
+	if (d->usb_vbus_gpios) {
 		/*
 		 * Confirmed on real hardware that this needs to actually
 		 * be held low, not just pulsed -- the machine parks (IRQs
 		 * off, CPUs stopped) shortly after this returns, which is
 		 * exactly what leaves it held indefinitely from here on.
 		 */
-		for (i = 0; i < wdmc_poweroff->usb_vbus_gpios->ndescs; i++)
-			gpiod_direction_output(wdmc_poweroff->usb_vbus_gpios->desc[i], 0);
+		for (i = 0; i < d->usb_vbus_gpios->ndescs; i++)
+			gpiod_direction_output(d->usb_vbus_gpios->desc[i], 0);
 	}
+
+	if (d->wdt_ctl) {
+		val = readl(d->wdt_ctl) & ~WDMC_WDT_EN_MASK;
+		writel(val | WDMC_WDT_DISABLED, d->wdt_ctl);
+	}
+}
+
+/* Ask the audio CPU to suspend to coolboot; the firmware clears the request when it takes it */
+static void wdmc_acpu_poweroff(struct wdmc_poweroff_data *d)
+{
+	void __iomem *ipc = d->ipc;
+	void __iomem *uart = d->uart;
+	unsigned int i;
+	u32 val;
+
+	if (!ipc)
+		return;
+
+	/* The firmware prints on UART0 before taking the request: loop it back to drain */
+	if (uart) {
+		for (i = 0; i < 10000; i++) {
+			if (readl(uart + WDMC_UART_LSR) & WDMC_UART_LSR_TEMT)
+				break;
+			udelay(10);
+		}
+		val = readl(uart + WDMC_UART_MCR);
+		writel(val | WDMC_UART_MCR_LOOP, uart + WDMC_UART_MCR);
+	}
+
+	/* Suspend version 2, author SCPU, coolboot */
+	iowrite32be(0x00020000, ipc + WDMC_IPC_SUSPEND_MASK);
+	iowrite32be(0x40000002, ipc + WDMC_IPC_SUSPEND_FLAG);
+	iowrite32be(0xdeadffff, ipc + WDMC_IPC_AUDIO_RPC_FLAG);
+	for (i = 0; i < 1000 && ioread32be(ipc + WDMC_IPC_AUDIO_RPC_FLAG); i++)
+		mdelay(1);
+	pr_emerg("wdmc-poweroff: the audio CPU %s the power-off request\n",
+		 i < 1000 ? "took" : "did not take");
+}
+
+/* Switch every rail off through the PMIC's ONOFF register; returns only if that fails */
+static void wdmc_pmic_cut(struct wdmc_poweroff_data *d)
+{
+	struct i2c_client *pmic;
+	int ret;
+
+	if (!d->pmic)
+		return;
+	pmic = of_find_i2c_device_by_node(d->pmic);
+	if (!pmic) {
+		pr_emerg("wdmc-poweroff: no PMIC on I2C (the PMIC modules are not loaded?), falling back to the audio CPU\n");
+		return;
+	}
+	pr_emerg("wdmc-poweroff: PMIC ONOFF=%02x: switching every rail off\n",
+		 i2c_smbus_read_byte_data(pmic, G2227_REG_ONOFF));
+	ret = i2c_smbus_write_byte_data(pmic, G2227_REG_ONOFF, 0);
+	/* the board normally loses all power here */
+	mdelay(500);
+	pr_emerg("wdmc-poweroff: still running 0.5 s after the PMIC ONOFF write (ret=%d)\n", ret);
+	put_device(&pmic->dev);
+}
+
+/*
+ * Runs after device_shutdown() (the disks are stopped) and may sleep, with
+ * interrupts on, so the PMIC can be reached over its normal I2C driver.
+ */
+static int wdmc_poweroff_prepare(struct sys_off_data *sd)
+{
+	struct wdmc_poweroff_data *d = sd->cb_data;
+
+	d->prepare_ran = true;
+	wdmc_quiesce(d);
+	wdmc_pmic_cut(d);
+	wdmc_acpu_poweroff(d);
+	return NOTIFY_DONE;
+}
+
+static void wdmc_poweroff_handler(void)
+{
+	if (!wdmc_poweroff)
+		return;
+
+	/* Normally the prepare handler above has already done the real work */
+	if (!wdmc_poweroff->prepare_ran) {
+		wdmc_quiesce(wdmc_poweroff);
+		wdmc_acpu_poweroff(wdmc_poweroff);
+	}
+
+	for (;;)
+		wfi();
 }
 
 static int wdmc_poweroff_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct wdmc_poweroff_data *data;
+	struct device_node *rmem;
 	struct resource *res;
 	int ret, i;
 
@@ -153,35 +239,31 @@ static int wdmc_poweroff_probe(struct platform_device *pdev)
 	if (!data->pwm_base)
 		return -ENOMEM;
 
+	/* reg[1] watchdog control, reg[2] UART0: both optional */
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 1);
-	if (res) {
-		data->misc_gpio_dato = devm_ioremap(dev, res->start, resource_size(res));
-		if (!data->misc_gpio_dato)
-			return -ENOMEM;
-	}
-
+	if (res && !(data->wdt_ctl = devm_ioremap(dev, res->start, resource_size(res))))
+		return -ENOMEM;
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 2);
-	if (res) {
-		data->misc_gpio_dir = devm_ioremap(dev, res->start, resource_size(res));
-		if (!data->misc_gpio_dir)
-			return -ENOMEM;
+	if (res && !(data->uart = devm_ioremap(dev, res->start, resource_size(res))))
+		return -ENOMEM;
+
+	/* The RPC page must be no-map: the audio CPU reads it uncached */
+	rmem = of_parse_phandle(dev->of_node, "memory-region", 0);
+	if (rmem) {
+		struct resource ipc;
+
+		ret = of_address_to_resource(rmem, 0, &ipc);
+		of_node_put(rmem);
+		if (ret)
+			return dev_err_probe(dev, ret, "bad memory-region\n");
+		data->ipc = devm_ioremap(dev, ipc.start, resource_size(&ipc));
+		if (!data->ipc)
+			return dev_err_probe(dev, -ENOMEM, "cannot map memory-region\n");
 	}
 
-	if (data->misc_gpio_dir && data->misc_gpio_dato) {
-		ret = of_property_read_u32(dev->of_node, "wd,misc-gpio-vbus-bit",
-					    &data->misc_gpio_vbus_bit);
-		if (ret || data->misc_gpio_vbus_bit >= 32)
-			return dev_err_probe(dev, -EINVAL,
-					      "bad or missing wd,misc-gpio-vbus-bit\n");
-	}
-
-	/*
-	 * GPIOD_ASIS: don't touch the line's current state at probe time
-	 * (the board is already up and these ports are already powered);
-	 * the shutdown handler is the only place this ever gets driven.
-	 */
+	/* U-Boot powers USB only when it boots from USB, so raise VBUS here */
 	data->usb_vbus_gpios = devm_gpiod_get_array_optional(dev, "wd,usb-vbus",
-							       GPIOD_ASIS);
+							       GPIOD_OUT_HIGH);
 	if (IS_ERR(data->usb_vbus_gpios))
 		return dev_err_probe(dev, PTR_ERR(data->usb_vbus_gpios),
 				      "failed to get usb-vbus gpios\n");
@@ -202,6 +284,14 @@ static int wdmc_poweroff_probe(struct platform_device *pdev)
 		data->pwm_channels[i] = ch;
 	}
 
+	/* The PMIC's I2C driver is a module that probes later: look the client up at power-off */
+	data->pmic = of_parse_phandle(dev->of_node, "wd,pmic", 0);
+
+	ret = devm_register_sys_off_handler(dev, SYS_OFF_MODE_POWER_OFF_PREPARE,
+					    SYS_OFF_PRIO_DEFAULT, wdmc_poweroff_prepare, data);
+	if (ret)
+		return dev_err_probe(dev, ret, "cannot register the power-off prepare handler\n");
+
 	if (pm_power_off)
 		return dev_err_probe(dev, -EBUSY,
 				      "pm_power_off already claimed\n");
@@ -210,15 +300,20 @@ static int wdmc_poweroff_probe(struct platform_device *pdev)
 	pm_power_off = wdmc_poweroff_handler;
 	platform_set_drvdata(pdev, data);
 
-	dev_info(dev, "registered as pm_power_off (%u pwm channel(s), %u usb vbus gpio(s))\n",
+	dev_info(dev, "registered as pm_power_off (%u pwm channel(s), %u usb vbus gpio(s)%s)\n",
 		 data->n_pwm_channels,
-		 data->usb_vbus_gpios ? data->usb_vbus_gpios->ndescs : 0);
+		 data->usb_vbus_gpios ? data->usb_vbus_gpios->ndescs : 0,
+		 data->ipc ? ", audio CPU coolboot" : "");
 
 	return 0;
 }
 
 static void wdmc_poweroff_remove(struct platform_device *pdev)
 {
+	struct wdmc_poweroff_data *data = platform_get_drvdata(pdev);
+
+	of_node_put(data->pmic);
+
 	if (pm_power_off == wdmc_poweroff_handler) {
 		pm_power_off = NULL;
 		wdmc_poweroff = NULL;
