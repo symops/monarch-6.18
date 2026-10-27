@@ -1,6 +1,6 @@
 # Linux 6.18 for WD My Cloud Home (Realtek RTD1295 "Monarch")
 
-This tree is vanilla `v6.18.55` (rebased from the initial `v6.18` this port
+This tree is vanilla `v6.18.59` (rebased from the initial `v6.18` this port
 started on via a 3-way merge, `v6.18` as merge base — see "Updating the base
 version" below) plus a board port for the WD My Cloud Home
 (single-bay), a NAS built around Realtek's RTD1295 SoC. It replaces the
@@ -18,14 +18,18 @@ had to be forward-ported from the vendor's 4.9-era Realtek BSP.
 
 Verified end-to-end on real hardware: SMP (4 cores), SATA (real disk,
 6.0 Gbps link, RAID assembly, root mount), USB 2.0/3.0 (host, mass
-storage), Ethernet, RTC (flash-backed, survives reboot), PWM/LED,
-cpufreq (all 3 board OPPs), watchdog, thermal.
+storage; VBUS raised by `wdmc-poweroff`), Ethernet (jumbo MTU up to
+9200), RTC (flash-backed, survives reboot), PWM/LED, cpufreq with DVFS
+(WD's five OPPs, 600-1400 MHz, the CPU and L2 rails scaled through the
+G2227 PMIC), watchdog, thermal, the ISO and MISC GPIO banks (mainline
+`gpio-rtd`), and a power-off that really cuts the power (through the
+PMIC; see the Progress log).
 
-Not done: GPIO/pinctrl (no mainline `gpio-rtd129x`/`pinctrl-rtd129x`
-driver exists yet — see below), I2C PMIC regulator stack (built but
-doesn't probe, see below), full CRT clock controller (only the one CPU
-clock needed for cpufreq is ported, not the whole vendor
-`clk_pll_div`/mux/gate framework).
+Not done: the full CRT clock controller (only the one CPU clock needed
+for cpufreq is ported, not the whole vendor `clk_pll_div`/mux/gate
+framework). The PMIC stack (`pinctrl-single`, `i2c-rtk`, the G2227 MFD
+and regulator drivers) works but is built as **modules**, so the PMIC,
+DVFS and the real power-off start once udev has loaded them; see "Config".
 
 ## Where this code came from
 
@@ -57,6 +61,12 @@ watchdog, thermal, IRQ mux, I2C, the MFD/regulator stack, the board DTS
 skeleton, and the rescue-userspace `init` script this port's own
 storage load-order fixes sit on top of.
 
+Thanks as well to [qzydustin](https://github.com/qzydustin), who ran this
+port on a real Monarch and contributed power-off through the audio CPU,
+jumbo MTU, the MISC GPIO controller, and the G2227 PMIC with CPU voltage
+scaling (PRs #6-#9, issue #10), and who found the USB VBUS regression
+(issue #14) and suggested the `BPF_JIT` and CUBIC options.
+
 ## Change summary (relative to vanilla v6.18)
 
 ### Board
@@ -78,10 +88,11 @@ storage load-order fixes sit on top of.
   standard `ahci_platform`/`libahci_platform` framework, not
   `generic-ahci`: this SoC's AHCI block needs several vendor-specific
   register pokes generic-ahci knows nothing about (MMIO offsets
-  `0xf20`/`0xc`), a drive-bay power GPIO raised by raw MMIO poke (no
-  mainline `gpio-rtd129x` driver/binding exists to do this properly
-  yet), and a deferred host-init delay matching the vendor driver's
-  default. Most importantly: an explicit deassert of the
+  `0xf20`/`0xc`), the drive-bay power supply (a `power-gpios` line on
+  the MISC GPIO controller, handled through gpiolib since PR #8; it was a
+  raw MMIO poke before the controller had a DT node, and it is lowered
+  at shutdown on a power-off), and a deferred host-init delay matching
+  the vendor driver's default. Most importantly: an explicit deassert of the
   `SATA_PHY_POW_0` reset bit (CRT offset `0x00`, bit 10) — the SATA
   analog PHY power macro is left in hardware reset by the boot loader
   on a cold boot path (reproducible via the physical USB-Install
@@ -193,8 +204,14 @@ storage load-order fixes sit on top of.
   in the same block, so the driver reaches both through `&crt`'s
   syscon regmap instead of a private MMIO sub-window that could only
   cover one of them.
-- Three board OPPs in the DTS (300375/600750/1100000 kHz) match the
-  vendor's boot-time PLL setting and its double/half.
+- The OPP table in the DTS follows WD's own five points, 600/800/1000/
+  1200/1400 MHz, with 825/875/925/1012.5/1100 mV on the CPU rail; the L2
+  rail follows through regulator coupling (see the power-off and PMIC
+  entries in the Progress log). Before the G2227 PMIC and DVFS work it
+  was three OPPs (300375/600750/1100000 kHz) matching the vendor's
+  boot-time PLL setting and its double/half. The 300.375/600.75 MHz
+  entries can no longer retarget the boot PLL (fixed in
+  `clk-rtd129x-scpu`).
 
 ### IRQ mux
 
@@ -221,7 +238,7 @@ initializing, but the board runs fine without it).
 
 ## Progress log
 
-### Cosmetic poweroff driver (`drivers/power/reset/wdmc-poweroff.c`) — LED, HDD, USB VBUS
+### Power-off driver (`drivers/power/reset/wdmc-poweroff.c`) — LED, HDD, USB VBUS, rails
 
 Neither mainline nor the vendor 4.9.330 source implements a real
 hardware power-off for this board (no board-level 12V power-hold GPIO
@@ -262,6 +279,31 @@ quiets everything actually under this SoC's control at shutdown time:
 different `rtk_iso_gpio` lines entirely — see symops/pelican-6.18's
 README for that board's assignment and the full discovery
 methodology).
+
+**Real power-off (v6.18.56 and later).** The paragraphs above describe the
+first, cosmetic version. Since then the board really powers off:
+
+- The audio CPU's "suspend to coolboot" request (PRs #6-#9 by qzydustin)
+  works most of the time, but on real hardware the audio CPU's firmware
+  sometimes hangs: it neither reads the RPC flag nor acknowledges the SB2
+  doorbell, and restarting it crashes it. On a Duo that was about a third
+  of the cycles (the board then stays at ~1.7 W until the mains is cut);
+  a Monarch was seen once at ~1.4 W. So the driver now powers off from a
+  `SYS_OFF_MODE_POWER_OFF_PREPARE` handler, after `device_shutdown()` (the
+  disks are stopped) and in process context with interrupts on, and writes
+  0 to the G2227's `ONOFF` register (0x05) over I2C: every rail, 3.3 V and
+  the ISO domain included, goes off at once (0 W, normal start afterwards,
+  confirmed on both boards). The audio CPU's coolboot is only the fallback
+  when the PMIC cannot be reached (its modules not loaded).
+- Leaving 3.3 V and ISO on while the rest collapses (`ONOFF = 0x88`) is not
+  an alternative: a Duo then drew ~4 W with the fan at full speed, because
+  the isolation the audio CPU performs before its coolboot was missing.
+- `wdmc-poweroff.c` is now the same file in this repository and in
+  symops/pelican-6.18 (keep them identical). The USB VBUS lines are raised
+  at probe (`GPIOD_OUT_HIGH`), because U-Boot powers the USB ports only on
+  its USB boot paths, not when it boots from SATA (issue #14). The drive
+  bay supply is owned by `ahci_rtd1295` (a gpiod `power` line) and lowered
+  at shutdown.
 
 ### Base version bump: v6.18.46 → v6.18.51
 
@@ -311,6 +353,18 @@ so that change lives only in built artifacts, not in this history.
 
 Rebased onto v6.18.55 the same way — clean merge, no conflicts.
 Rebuilt and repackaged with `LOCALVERSION=` as usual.
+
+### Base version bump: v6.18.55 → v6.18.59
+
+v6.18.55 → v6.18.56 and v6.18.56 → v6.18.59 went in the same way, as
+single-parent "Merge upstream" commits made by a 3-way tree merge (the
+previous upstream tag as base): no conflicts with the board code; the
+only conflict was the stock top-level `README`, which this tree keeps
+deleted (`README.md` is ours). The shared drivers (`wdmc-poweroff.c`, the
+G2227 MFD/regulator drivers, `rtd129x.dtsi`) were brought back in line
+with symops/pelican-6.18 on the way, and `BUILDING.md` is the same
+document in both repositories. Rebuilt and repackaged with `LOCALVERSION=`;
+the `.config` of the release (`default.config`) is described under "Config".
 
 ## Building and booting
 
@@ -416,6 +470,24 @@ all — without it the initramfs's own network-rescue DHCP client fails
 immediately with `EAFNOSUPPORT`, before any module could be inserted to
 provide it).
 
+**Built in since v6.18.59** (suggested by qzydustin in issue #10): `BPF_JIT=y`
+(built in only; about 19 KB of code, `BPF_JIT_DEFAULT_ON`), so Docker's
+seccomp filters and systemd's cgroup BPF programs run JIT-compiled, and
+`TCP_CONG_CUBIC=y` with `DEFAULT_TCP_CONG="cubic"` (CUBIC was a module and
+Reno the default). `olddefconfig` added the Kerberos symbols for the
+in-kernel SMB/NFS stack with 6.18.59 (`RPCSEC_GSS_KRB5_ENCTYPES_AES_SHA1=y`,
+`CRYPTO_KRB5`, `CRYPTO_KRB5ENC`, `CRYPTO_CTS`, `CRYPTO_CAMELLIA` as
+modules). The `.config` is not tracked in git; it is the `default.config`
+attached to each release.
+
+**Modules by design**: `PHY_RTK_RTD_SATAPHY`, `USB_STORAGE` and `USB_UAS`
+stay modules, because the rescue initramfs inserts exactly these by hand;
+the same goes for the PMIC drivers (`PINCTRL_SINGLE`, `MFD_G2227_I2C`,
+`REGULATOR_G2227`, `I2C_RTK`), which on the Duo bring back the CPU0 hang
+when built in (the idle workaround is layout-sensitive — see symops/
+pelican-6.18's README). udev loads the PMIC modules during boot (about
+13 s in on qzydustin's unit), after which cpufreq comes up with all five OPPs.
+
 **Docker/container support**: checked against upstream Docker's own
 `contrib/check-config.sh` requirements list. The baseline config
 already covered essentially everything in the "required" tier
@@ -432,8 +504,9 @@ checks -- `SECURITY_SELINUX`/`SECURITY_APPARMOR`, `DEVPTS_MULTIPLE_
 INSTANCES`, `IOSCHED_CFQ`, `NETPRIO_CGROUP` -- are either genuinely out
 of scope for this minimal embedded config or no longer exist as
 separate options on this kernel version; `CGROUP_NET_PRIO` already
-covers the modern equivalent of `NETPRIO_CGROUP`.) Not yet tested with
-an actual Docker/container workload on real hardware.
+covers the modern equivalent of `NETPRIO_CGROUP`.) `BPF_JIT` is built in
+since v6.18.59 (see above). Not yet tested by the maintainer with an actual
+Docker/container workload on real hardware.
 
 ## Updating the base version
 
