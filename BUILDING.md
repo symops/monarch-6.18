@@ -51,6 +51,15 @@ These matter for a Duo (Pelican) build; the release `default.config` plus the fo
 
 Consequences of the modules: the PMIC, DVFS (`cpufreq-dt` stays in deferred probe until `g2227-regulator` loads, about 37 s into boot with udev) and the real power-off (the g2227 driver's coldboot sleep states cut the rails at `shutdown`) only work once the modules are loaded. The rescue initrd does not load them, so `cpufreq-dt: deferred probe pending` there is expected.
 
+**What the release `default.config` carries beyond the board options** (since v6.18.59):
+
+- `BPF_JIT=y` (built in, `BPF_JIT_DEFAULT_ON`): Docker's seccomp filters and systemd's cgroup BPF programs (device, IP filters) run JIT-compiled instead of in the interpreter. It cannot be a module and adds about 19 KB of code.
+- `TCP_CONG_CUBIC=y` with `DEFAULT_TCP_CONG="cubic"` (before: CUBIC as a module, Reno as the default).
+- The symbols `olddefconfig` adds with 6.18.59: `RPCSEC_GSS_KRB5_ENCTYPES_AES_SHA1=y` and `CRYPTO_KRB5`, `CRYPTO_KRB5ENC`, `CRYPTO_CTS`, `CRYPTO_CAMELLIA` as modules (Kerberos for the in-kernel SMB/NFS stack).
+- Deliberately **modules**, whatever else changes: `PHY_RTK_RTD_SATAPHY`, `USB_STORAGE` and `USB_UAS` (the rescue initramfs inserts exactly these by hand) and the PMIC drivers above.
+
+The CPU0 idle workaround depends on the layout of the built-in code, so every change to what is built in (the two options above included) is worth a few cold boots on a Duo before it is released.
+
 **Always pass `ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-` to every `make`, including `olddefconfig`.** A `make` run without `ARCH` configures against the host (x86) Kconfig and silently strips the board options from `.config` (`ARCH_REALTEK`, `IRQ_RTD129X_MUX`, `CMDLINE`, ...): no UART console, `dw-apb-uart: IRQ index 0 not found`, `/init` exits at once. If a boot looks like that, check `grep -E 'ARCH_REALTEK|IRQ_RTD129X_MUX|^CONFIG_CMDLINE=' .config` and re-fetch `default.config`.
 
 ## 4. Build the kernel, modules, and device trees
