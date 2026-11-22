@@ -136,7 +136,15 @@ static int rtd119x_rtc_set_time(struct device *dev, struct rtc_time *tm)
 	for (i = data->base_year; i < 1900 + tm->tm_year; i++)
 		day += rtd119x_rtc_days_in_year(i);
 
-	day += tm->tm_yday;
+	/*
+	 * Not tm->tm_yday: its base depends on the caller. rtc_time64_to_tm(),
+	 * which the kernel's own RTC update (CONFIG_RTC_SYSTOHC, every 11
+	 * minutes while NTP-synchronised) goes through, makes it 1-based,
+	 * while userspace (hwclock, a struct tm from glibc) passes it 0-based.
+	 * Adding it put the RTC exactly one day ahead after every kernel
+	 * update. Derive the day of the year from the date itself instead.
+	 */
+	day += rtc_year_days(tm->tm_mday, tm->tm_mon, 1900 + tm->tm_year);
 	if (day > 0x7fff)
 		return -EINVAL;
 
